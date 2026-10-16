@@ -611,7 +611,7 @@ test('aligning is refused without a bound workspace, and without the client serv
   assert.equal(align.props.disabled, true, 'the button is disabled without a workspace')
   align.props.onClick()
   assert.equal(harness.jumps.length, 0)
-  assert.equal(face.hooks.todo.getSnapshot().notice, '这条便签没有绑定工作区，先在编辑里绑一个。')
+  assert.equal(face.hooks.todo.getSnapshot().notice, '这条便签没有绑定工作区，先在标题下面绑一个。')
 
   const bare = boot(
     { state: () => ({ nodes: [NODE], total: 1, truncated: false, storage: { ok: true, backend: 'json', error: '' }, preferences: { provider: '', model: '', alignPrompt: '' } }) },
@@ -621,4 +621,83 @@ test('aligning is refused without a bound workspace, and without the client serv
   const button = findAll(second.tree, (node) => node.type === primitives.Button && textOf(node).join('') === '去工作区对齐')[0]
   button.props.onClick()
   assert.equal(second.face.hooks.todo.getSnapshot().notice, '当前客户端没有工作区导航能力，无法跳转。')
+})
+
+const OTHER = {
+  ...NODE,
+  id: 'n2',
+  title: '压测脚本改成可配置',
+  body: '并发数写死了',
+  workspaceId: 'ws-2',
+  workspaceTitle: 'Study',
+  workspacePath: 'D:\\Study',
+}
+
+test('the console filters notes by workspace, including the unbound ones', async () => {
+  const unbound = { ...NODE, id: 'n3', title: '还没想好放哪', workspaceId: '', workspaceTitle: '', workspacePath: '' }
+  const harness = boot({
+    state: () => ({ nodes: [NODE, OTHER, unbound], total: 3, truncated: false, storage: { ok: true, backend: 'json', error: '' }, preferences: { provider: '', model: '', alignPrompt: '' } }),
+  })
+  const main = harness.registrations.find((entry) => entry.options.name === 'main')
+  const face = main.options.inject()
+  await face.todo.refresh()
+  const workspaces = [
+    { workspaceId: 'ws-1', title: 'DSHarness', path: 'D:\\DSHarness', sessionIds: [] },
+    { workspaceId: 'ws-2', title: 'Study', path: 'D:\\Study', sessionIds: [] },
+  ]
+  const props = { ...seats(face, { workspaces }), ...face }
+
+  const all = react.render(main.Component, props)
+  const filterSelect = findAll(all, (node) => node.props.className === 'tn-filter-select')[0]
+  assert.ok(filterSelect, 'the workspace filter is rendered')
+  assert.deepEqual(
+    filterSelect.children.map((option) => option.props.value),
+    ['all', 'none', 'ws-1', 'ws-2'],
+    'every workspace plus the two fixed choices are offered',
+  )
+  assert.match(textOf(all).join('|'), /压测脚本改成可配置/)
+
+  face.todo.setWorkspaceFilter('ws-2')
+  const onlyStudy = react.rerender(main.Component, props)
+  const studyText = textOf(onlyStudy).join('|')
+  assert.match(studyText, /压测脚本改成可配置/)
+  assert.doesNotMatch(studyText, /接入审计日志/)
+
+  face.todo.setWorkspaceFilter('none')
+  const onlyUnbound = react.rerender(main.Component, props)
+  const unboundText = textOf(onlyUnbound).join('|')
+  assert.match(unboundText, /还没想好放哪/)
+  assert.doesNotMatch(unboundText, /接入审计日志/)
+})
+
+test('the detail header rebinds a note to a workspace without opening the editor', async () => {
+  const harness = boot({
+    state: () => ({ nodes: [NODE], total: 1, truncated: false, storage: { ok: true, backend: 'json', error: '' }, preferences: { provider: '', model: '', alignPrompt: '' } }),
+    update: (payload) => ({ ...NODE, ...payload }),
+  })
+  const main = harness.registrations.find((entry) => entry.options.name === 'main')
+  const face = main.options.inject()
+  await face.todo.refresh()
+  const workspaces = [
+    { workspaceId: 'ws-1', title: 'DSHarness', path: 'D:\\DSHarness', sessionIds: [] },
+    { workspaceId: 'ws-2', title: 'Study', path: 'D:\\Study', sessionIds: [] },
+  ]
+  const props = { ...seats(face, { workspaces }), ...face }
+  const tree = react.render(main.Component, props)
+  const picker = findAll(tree, (node) => node.props.className === 'tn-select-sm')[0]
+  assert.ok(picker, 'the header carries a workspace picker')
+  assert.equal(picker.props.value, 'ws-1')
+  picker.props.onChange({ target: { value: 'ws-2' } })
+  await new Promise((resolve) => { setTimeout(resolve, 20) })
+  assert.deepEqual(
+    harness.calls.find((entry) => entry.endpoint === 'update').payload,
+    { id: 'n1', workspaceId: 'ws-2', workspaceTitle: 'Study', workspacePath: 'D:\\Study' },
+  )
+
+  const reopened = react.rerender(main.Component, props)
+  findAll(reopened, (node) => node.props.className === 'tn-select-sm')[0].props.onChange({ target: { value: '' } })
+  await new Promise((resolve) => { setTimeout(resolve, 20) })
+  const unbind = harness.calls.filter((entry) => entry.endpoint === 'update').at(-1)
+  assert.deepEqual(unbind.payload, { id: 'n1', workspaceId: '', workspaceTitle: '', workspacePath: '' })
+  assert.equal(face.hooks.todo.getSnapshot().notice, '已取消工作区绑定')
 })

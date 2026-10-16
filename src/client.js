@@ -109,12 +109,19 @@ function createTodoNotePlugin(require) {
     settingsAlignHint: '「去工作区对齐」时，这段话会放在计划前面一起填进新会话的输入框（不会自动发送）。留空就用默认的那句。',
     align: '去工作区对齐',
     alignHint: '在当前绑定的工作区新开一个会话，把这段话填进输入框，按不按发送由你决定。',
-    alignNeedsWorkspace: '这条便签没有绑定工作区，先在编辑里绑一个。',
+    alignNeedsWorkspace: '这条便签没有绑定工作区，先在标题下面绑一个。',
     alignUnsupported: '当前客户端没有工作区导航能力，无法跳转。',
     alignFailed: '跳转失败：',
     alignFilling: '正在把计划填进输入框…',
     alignFilled: '计划已填进输入框（不会自动发送）',
     alignNoPrefill: '这个客户端没有提供输入框填充能力，计划没有填进去。',
+    filterLabel: '按工作区筛选',
+    filterAll: '全部工作区',
+    filterNone: '未绑定工作区',
+    bindWorkspace: '工作区',
+    unboundWorkspace: '未绑定',
+    boundTo: '已绑定工作区：',
+    unboundDone: '已取消工作区绑定',
   }
 
   const CSS = `
@@ -126,7 +133,13 @@ function createTodoNotePlugin(require) {
 .tn-head h1{font-size:20px;line-height:28px;margin:0}
 .tn-sub{color:var(--dsw-alias-label-tertiary);font-size:12px;margin-top:2px}
 .tn-head-actions{display:flex;gap:8px;flex-shrink:0}
-.tn-tabs{margin-bottom:16px}
+.tn-toolbar{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.tn-toolbar-tabs{flex:1;min-width:0}
+.tn-filter{flex:0 0 auto;width:200px;max-width:38%}
+.tn-filter-select{width:100%;box-sizing:border-box;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);
+  background:var(--dsw-alias-bg-layer-1);border:0.5px solid var(--dsw-alias-border-l3);
+  border-radius:var(--dsw-radius-sm,8px);padding:6px 8px}
+.tn-filter-select:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}
 .tn-warn{margin-bottom:14px;padding:8px 12px;border-radius:var(--dsw-radius-md,12px);
   background:var(--dsw-alias-state-error-secondary);color:var(--dsw-alias-state-error-primary);font-size:12px}
 .tn-split{display:grid;grid-template-columns:minmax(190px,250px) minmax(0,1fr);gap:20px;align-items:start}
@@ -142,7 +155,16 @@ function createTodoNotePlugin(require) {
 .tn-detail{border:0;background:var(--dsw-alias-bg-layer-2);box-shadow:var(--dsw-elevation-panel);
   border-radius:var(--dsw-radius-lg,16px);padding:16px 18px;min-width:0;min-height:200px}
 .tn-detail h2{margin:0;font-size:16px;line-height:24px;word-break:break-word}
-.tn-detail-meta{color:var(--dsw-alias-label-tertiary);font-size:12px;margin-top:4px;word-break:break-all}
+.tn-detail-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.tn-detail-title{min-width:0;flex:1}
+.tn-detail-actions{display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
+.tn-detail-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
+  color:var(--dsw-alias-label-tertiary);font-size:12px;margin-top:6px}
+.tn-select-sm{width:auto;max-width:220px;box-sizing:border-box;font:inherit;font-size:12px;
+  color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);
+  border:0.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);padding:2px 6px}
+.tn-select-sm:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}
+.tn-detail-path{word-break:break-all}
 .tn-label{font-size:12px;color:var(--dsw-alias-label-tertiary);margin:16px 0 6px;letter-spacing:.02em}
 .tn-body{white-space:pre-wrap;word-break:break-word;color:var(--dsw-alias-label-primary)}
 .tn-body-empty{color:var(--dsw-alias-label-dimmed)}
@@ -277,6 +299,8 @@ function createTodoNotePlugin(require) {
       truncated: false,
       storage: { ok: true, backend: '', error: '' },
       view: 'active',
+      /** 'all' | 'none' | a workspace id. */
+      workspaceFilter: 'all',
       selectedId: '',
       editor: null,
       settingsOpen: false,
@@ -368,6 +392,30 @@ function createTodoNotePlugin(require) {
 
       setView(view) {
         source.set({ view: view === 'archived' ? 'archived' : 'active', selectedId: '', confirmingId: '' })
+      },
+
+      /** @param value - 'all', 'none', or a workspace id. */
+      setWorkspaceFilter(value) {
+        source.set({ workspaceFilter: String(value ?? 'all'), selectedId: '', confirmingId: '' })
+      },
+
+      /**
+       * Bind or unbind a note's workspace straight from the detail header.
+       * @param node - the note being rebound.
+       * @param workspace - the chosen workspace, or null to unbind.
+       */
+      async bindNodeWorkspace(node, workspace) {
+        if (node === undefined || node === null) return
+        await guard(async () => {
+          await call('update', {
+            id: node.id,
+            workspaceId: workspace === null ? '' : String(workspace.workspaceId ?? ''),
+            workspaceTitle: workspace === null ? '' : String(workspace.title ?? ''),
+            workspacePath: workspace === null ? '' : String(workspace.path ?? ''),
+          })
+          notice(workspace === null ? T.unboundDone : `${T.boundTo}${workspace.title || workspace.path}`)
+          await refresh()
+        })
       },
 
       openCreate(prefill) {
@@ -614,19 +662,55 @@ function createTodoNotePlugin(require) {
     )
   }
 
-  /** @param props - the selected node and the page actions. */
-  function NodeDetail({ node, actions }) {
+  /**
+   * @param props - the selected node, the page actions and the workspace catalog.
+   */
+  function NodeDetail({ node, actions, workspaces }) {
     const labels = React.useMemo(() => ({
       code: { copyLabel: '复制代码', copiedLabel: '已复制' },
       footnotes: '脚注',
     }), [])
     if (node === undefined) return h('div', { className: 'tn-detail' }, h('div', { className: 'tn-empty' }, T.detailEmpty))
     const refine = node.refine ?? { status: 'idle', content: '' }
+    const boundId = String(node.workspaceId ?? '')
+    const catalog = Array.isArray(workspaces) ? workspaces : []
+    const known = catalog.some((entry) => String(entry.workspaceId) === boundId)
     return h('div', { className: 'tn-detail' },
-      h('h2', null, node.title || T.untitled),
-      h('div', { className: 'tn-detail-meta' },
-        node.workspacePath ? `${node.workspaceTitle ? `${node.workspaceTitle} · ` : ''}${node.workspacePath}` : T.workspaceNone,
-        node.status === 'archived' ? ' · 已归档' : '',
+      h('div', { className: 'tn-detail-head' },
+        h('div', { className: 'tn-detail-title' },
+          h('h2', null, node.title || T.untitled),
+          h('div', { className: 'tn-detail-meta' },
+            h('span', null, `${T.bindWorkspace}：`),
+            h('select', {
+              className: 'tn-select-sm',
+              value: boundId,
+              title: T.bindWorkspace,
+              onChange: (event) => {
+                const next = catalog.find((entry) => String(entry.workspaceId) === event.target.value)
+                actions.bindNodeWorkspace(node, next ?? null)
+              },
+            },
+              h('option', { value: '' }, T.workspaceNone),
+              // A binding whose workspace is gone still has to be visible.
+              boundId !== '' && !known ? h('option', { value: boundId }, node.workspaceTitle || node.workspacePath || boundId) : null,
+              catalog.map((entry) => h('option', {
+                key: String(entry.workspaceId),
+                value: String(entry.workspaceId),
+              }, entry.title || entry.path)),
+            ),
+            boundId === '' ? null : h('span', { className: 'tn-detail-path' }, node.workspacePath),
+            node.status === 'archived' ? h('span', null, '· 已归档') : null,
+          ),
+        ),
+        h('div', { className: 'tn-detail-actions' },
+          h(Button, {
+            variant: 'primary',
+            disabled: !node.workspaceId,
+            title: node.workspaceId ? T.alignHint : T.alignNeedsWorkspace,
+            onClick: () => actions.alignToWorkspace(node),
+          }, T.align),
+          h(Button, { onClick: () => { void actions.copy(node) } }, T.copy),
+        ),
       ),
       h('div', { className: 'tn-label' }, T.mine),
       node.body && node.body.trim().length > 0
@@ -657,12 +741,6 @@ function createTodoNotePlugin(require) {
           disabled: refine.status === 'running',
           onClick: () => { void actions.refine(node.id, '') },
         }, refine.content ? T.refineAgain : T.refine),
-        h(Button, {
-          disabled: !node.workspaceId,
-          title: node.workspaceId ? T.alignHint : T.alignNeedsWorkspace,
-          onClick: () => actions.alignToWorkspace(node),
-        }, T.align),
-        h(Button, { onClick: () => { void actions.copy(node) } }, T.copy),
         h(Button, { onClick: () => actions.openEdit(node) }, T.edit),
         node.status === 'archived'
           ? h(Button, { onClick: () => { void actions.setArchived(node.id, false) } }, T.unarchive)
@@ -818,7 +896,25 @@ function createTodoNotePlugin(require) {
     React.useEffect(() => { void actions.refresh() }, [actions])
 
     const workspaceList = Array.isArray(workspaces) ? workspaces : []
-    const visible = state.nodes.filter((node) => (state.view === 'archived' ? node.status === 'archived' : node.status === 'active'))
+    // The filter offers every known workspace, plus any binding whose workspace
+    // is no longer in the catalog (so those notes stay reachable).
+    const filterOptions = workspaceList.map((entry) => ({
+      id: String(entry.workspaceId),
+      label: entry.title || entry.path,
+    }))
+    for (const node of state.nodes) {
+      const id = String(node.workspaceId ?? '')
+      if (id === '' || filterOptions.some((option) => option.id === id)) continue
+      filterOptions.push({ id, label: node.workspaceTitle || node.workspacePath || id })
+    }
+    const filter = state.workspaceFilter ?? 'all'
+    const visible = state.nodes
+      .filter((node) => (state.view === 'archived' ? node.status === 'archived' : node.status === 'active'))
+      .filter((node) => {
+        if (filter === 'all') return true
+        const id = String(node.workspaceId ?? '')
+        return filter === 'none' ? id === '' : id === filter
+      })
     const selected = visible.find((node) => node.id === state.selectedId) ?? visible[0]
     const pinned = state.preferences?.provider
     const modelLabel = pinned ? `${T.modelPinned}：${pinned} / ${state.preferences.model}` : T.modelFollowing
@@ -845,16 +941,31 @@ function createTodoNotePlugin(require) {
             ? h('div', { className: 'tn-warn' }, state.error)
             : null,
 
-          h('div', { className: 'tn-tabs' },
-            h(SegmentedTabs, {
-              items: [
-                { value: 'active', label: `${T.active} (${state.nodes.filter((node) => node.status !== 'archived').length})` },
-                { value: 'archived', label: `${T.archived} (${state.nodes.filter((node) => node.status === 'archived').length})` },
-              ],
-              value: state.view,
-              onChange: actions.setView,
-              label: T.viewLabel,
-            }),
+          h('div', { className: 'tn-toolbar' },
+            h('div', { className: 'tn-toolbar-tabs' },
+              h(SegmentedTabs, {
+                items: [
+                  { value: 'active', label: `${T.active} (${state.nodes.filter((node) => node.status !== 'archived').length})` },
+                  { value: 'archived', label: `${T.archived} (${state.nodes.filter((node) => node.status === 'archived').length})` },
+                ],
+                value: state.view,
+                onChange: actions.setView,
+                label: T.viewLabel,
+              }),
+            ),
+            h('div', { className: 'tn-filter' },
+              h('select', {
+                className: 'tn-filter-select',
+                value: filter,
+                title: T.filterLabel,
+                'aria-label': T.filterLabel,
+                onChange: (event) => actions.setWorkspaceFilter(event.target.value),
+              },
+                h('option', { value: 'all' }, T.filterAll),
+                h('option', { value: 'none' }, T.filterNone),
+                filterOptions.map((option) => h('option', { key: option.id, value: option.id }, option.label)),
+              ),
+            ),
           ),
 
           state.phase === 'loading'
@@ -868,7 +979,7 @@ function createTodoNotePlugin(require) {
                   active: selected !== undefined && node.id === selected.id,
                   onSelect: actions.select,
                 }))),
-                h(NodeDetail, { node: selected, actions }),
+                h(NodeDetail, { node: selected, actions, workspaces: workspaceList }),
               ),
 
           h(EditorModal, { state, actions, workspaces: workspaceList }),

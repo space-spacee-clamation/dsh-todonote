@@ -21,7 +21,7 @@ TodoNote 的做法是：
 
 | 界面 | 位置 | 做什么 |
 |---|---|---|
-| **监控台** | 左侧栏「计划便签」 | 列表 / 详情 / 新建 / 编辑 / 归档 / 复制 / 触发 AI 完善 / 跳转工作区 |
+| **监控台** | 左侧栏「计划便签」 | 列表 / 详情 / 新建 / 编辑 / 归档 / 复制 / 触发 AI 完善；**按工作区筛选**，详情标题下直接**改绑定工作区**，右上角一键**去工作区对齐** |
 | **小圆球** | 会话右下角（仅当会话绑定了工作区） | 点一下就地记一条，自动绑定当前工作区；可拖动，位置记在本机 |
 | **输入框提示** | 会话输入框下方 | 跳转工作区后显示「计划已填进输入框（不会自动发送）」 |
 
@@ -121,7 +121,7 @@ dsh plugin --profile <profile> add <本目录绝对路径>
 
 ```sh
 node tools/build.mjs              # src/host.js + src/prompt.js → lib/，src/client.js → lib/client.js
-node --test "tests/*.test.mjs"    # 49 个用例
+node --test "tests/*.test.mjs"    # 51 个用例
 ```
 
 - `src/host.js`：Cordis Host 插件 —— KV 存储、`/todonote` 路由、一次性 LLM 调用、设置持久化。
@@ -137,6 +137,10 @@ dsh --profile web --port 19888 --no-open     # 记下打印出的 ?token=…
 #   POST /todonote/state | create | refine | archive | remove | models | settings/set
 #   GET  /plugins/??dsh-todonote/client.js&rev=<index 里的 rev>
 ```
+
+## 相关
+
+- [dsh-plugin-whale-chan-pet](https://github.com/space-spacee-clamation/dsh-plugin-whale-chan-pet) —— 截图右下角那只鲸鱼娘，DSH 会话里的宠物挂件；上面几张截图就是它和 TodoNote 一起跑的样子。
 
 ## License
 
