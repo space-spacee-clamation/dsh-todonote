@@ -670,8 +670,7 @@ test('the console filters notes by workspace, including the unbound ones', async
   assert.doesNotMatch(unboundText, /接入审计日志/)
 })
 
-test('the detail header rebinds a note to a workspace without opening the editor', async () => {
-  const harness = boot({
+test('the detail header rebinds a note to a workspace without opening the editor', async () => {  const harness = boot({
     state: () => ({ nodes: [NODE], total: 1, truncated: false, storage: { ok: true, backend: 'json', error: '' }, preferences: { provider: '', model: '', alignPrompt: '' } }),
     update: (payload) => ({ ...NODE, ...payload }),
   })
@@ -700,4 +699,53 @@ test('the detail header rebinds a note to a workspace without opening the editor
   const unbind = harness.calls.filter((entry) => entry.endpoint === 'update').at(-1)
   assert.deepEqual(unbind.payload, { id: 'n1', workspaceId: '', workspaceTitle: '', workspacePath: '' })
   assert.equal(face.hooks.todo.getSnapshot().notice, '已取消工作区绑定')
+})
+
+test('the list footer reveals the storage folder through the shipped route', async () => {
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (input, init) => {
+    requests.push({ input: String(input), init })
+    if (String(input).includes('open-in-app/apps')) {
+      return { ok: true, json: async () => ({ apps: ['vscode', 'explorer'] }) }
+    }
+    return { ok: true, json: async () => ({ ok: true }) }
+  }
+  try {
+    const harness = boot({
+      state: () => ({ nodes: [NODE], total: 1, truncated: false, storage: { ok: true, backend: 'json', error: '' }, preferences: { provider: '', model: '', alignPrompt: '' } }),
+      'storage/path': () => ({ dir: 'C:\\Users\\me\\.dsh\\storages', nodes: 'C:\\Users\\me\\.dsh\\storages\\todonote.json' }),
+    })
+    const main = harness.registrations.find((entry) => entry.options.name === 'main')
+    const face = main.options.inject()
+    await face.todo.refresh()
+    const tree = react.render(main.Component, { ...seats(face), ...face })
+    const button = findAll(tree, (node) => node.type === primitives.Button && textOf(node).join('') === '打开存储位置')[0]
+    assert.ok(button, 'the footer carries the storage button')
+
+    await face.todo.openStorage()
+    assert.deepEqual(harness.calls.find((entry) => entry.endpoint === 'storage/path').payload, {})
+    assert.equal(requests.length, 2, 'apps first, then the open call')
+    assert.match(requests[1].input, /open-in-app\/open/)
+    assert.deepEqual(JSON.parse(requests[1].init.body), { app: 'explorer', path: 'C:\\Users\\me\\.dsh\\storages' })
+    assert.match(face.hooks.todo.getSnapshot().notice, /已在文件管理器打开/)
+
+    const reopened = react.rerender(main.Component, { ...seats(face), ...face })
+    assert.match(textOf(reopened).join('|'), /C:\\Users\\me\\\.dsh\\storages/, 'the path is shown under the list')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('without a file manager the storage path lands on the clipboard', async () => {
+  const harness = boot({
+    state: () => ({ nodes: [], total: 0, truncated: false, storage: { ok: true, backend: 'json', error: '' }, preferences: { provider: '', model: '', alignPrompt: '' } }),
+    'storage/path': () => ({ dir: '/tmp/todonote-storages', nodes: '/tmp/todonote-storages/todonote.json' }),
+  })
+  const main = harness.registrations.find((entry) => entry.options.name === 'main')
+  const face = main.options.inject()
+  clipboard.writes.length = 0
+  await face.todo.openStorage()
+  assert.deepEqual(clipboard.writes.at(-1), '/tmp/todonote-storages')
+  assert.match(face.hooks.todo.getSnapshot().notice, /已复制存储目录/)
 })

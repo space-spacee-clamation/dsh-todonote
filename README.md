@@ -90,6 +90,7 @@ dsh plugin --profile <profile> add <本目录绝对路径>
 
 - 便签：`$DSH_HOME/storages/todonote.json`（KV unit `todonote` v1，表 `nodes`，单文档布局，每次写入原子落盘）
 - 设置：`$DSH_HOME/storages/todonote-settings.json`（单独一个 unit，改设置不会重写便签文件）
+- 找不到文件？监控台**列表底部有「打开存储位置」**：点一下用系统文件管理器打开那个目录（走 DSH 自带的 `open-in-app` 路由；没有可用文件管理器时改成把路径复制到剪贴板），旁边会显示完整路径。
 - 一条便签：`{ id, title, body, workspaceId/Title/Path, status: active|archived, createdAt, updatedAt, archivedAt, refine: { status, content, provider, model, at, error, warning, history[] } }`
 - **同一份文件被所有 profile 共用**：`desktop` 和 `web` 同时开着时，两边各持一份内存副本，后写的盖先写的 —— 别在两个 profile 里同时编辑。
 
@@ -121,7 +122,7 @@ dsh plugin --profile <profile> add <本目录绝对路径>
 
 ```sh
 node tools/build.mjs              # src/host.js + src/prompt.js → lib/，src/client.js → lib/client.js
-node --test "tests/*.test.mjs"    # 51 个用例
+node --test "tests/*.test.mjs"    # 54 个用例
 ```
 
 - `src/host.js`：Cordis Host 插件 —— KV 存储、`/todonote` 路由、一次性 LLM 调用、设置持久化。

@@ -122,6 +122,11 @@ function createTodoNotePlugin(require) {
     unboundWorkspace: '未绑定',
     boundTo: '已绑定工作区：',
     unboundDone: '已取消工作区绑定',
+    openStorage: '打开存储位置',
+    openStorageHint: '便签就存在这个目录下的 todonote.json 里，点一下用文件管理器打开。',
+    storageOpened: '已在文件管理器打开存储目录',
+    storageCopied: '已复制存储目录（这台机器没有可用的文件管理器跳转）：',
+    storageUnknown: '暂时拿不到存储路径。',
   }
 
   const CSS = `
@@ -144,6 +149,9 @@ function createTodoNotePlugin(require) {
   background:var(--dsw-alias-state-error-secondary);color:var(--dsw-alias-state-error-primary);font-size:12px}
 .tn-split{display:grid;grid-template-columns:minmax(190px,250px) minmax(0,1fr);gap:20px;align-items:start}
 .tn-list{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tn-list-col{display:flex;flex-direction:column;gap:12px;min-width:0}
+.tn-list-foot{display:flex;flex-direction:column;gap:4px;align-items:flex-start}
+.tn-storage-path{word-break:break-all;text-align:left;line-height:1.4}
 .tn-card{display:block;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer;
   border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);
   border-radius:var(--dsw-radius-md,12px);padding:9px 11px}
@@ -308,6 +316,8 @@ function createTodoNotePlugin(require) {
       preferences: { provider: '', model: '', alignPrompt: '' },
       catalog: null,
       catalogError: '',
+      /** Absolute storage location, once asked for. */
+      storagePath: null,
       /** Plan text waiting to be dropped into the next session's composer. */
       pendingPrompt: '',
       notice: '',
@@ -620,6 +630,29 @@ function createTodoNotePlugin(require) {
       clearPending(message) {
         source.set({ pendingPrompt: '' })
         if (typeof message === 'string' && message.length > 0) notice(message)
+      },
+
+      /**
+       * Reveal where the notes live: ask the host for the absolute path and
+       * hand the directory to the OS file manager through the shipped
+       * `open-in-app` route. Falls back to the clipboard.
+       */
+      async openStorage() {
+        await guard(async () => {
+          const info = await call('storage/path', {})
+          const dir = typeof info?.dir === 'string' ? info.dir : ''
+          if (dir.length === 0) {
+            notice(T.storageUnknown)
+            return
+          }
+          source.set({ storagePath: info })
+          if (await deps.openPath(dir)) {
+            notice(`${T.storageOpened}：${dir}`)
+            return
+          }
+          const copied = await writeClipboard(dir)
+          notice(copied ? `${T.storageCopied}${dir}` : `${T.openStorageHint}${dir}`)
+        })
       },
 
       openConsole() {
@@ -973,12 +1006,27 @@ function createTodoNotePlugin(require) {
             : visible.length === 0
               ? h('div', { className: 'tn-empty' }, state.view === 'archived' ? T.emptyArchived : T.empty)
               : h('div', { className: 'tn-split' },
-                h('div', { className: 'tn-list' }, visible.map((node) => h(NodeCard, {
-                  key: node.id,
-                  node,
-                  active: selected !== undefined && node.id === selected.id,
-                  onSelect: actions.select,
-                }))),
+                h('div', { className: 'tn-list-col' },
+                  h('div', { className: 'tn-list' }, visible.map((node) => h(NodeCard, {
+                    key: node.id,
+                    node,
+                    active: selected !== undefined && node.id === selected.id,
+                    onSelect: actions.select,
+                  }))),
+                  h('div', { className: 'tn-list-foot' },
+                    h(Button, {
+                      size: 'sm',
+                      title: T.openStorageHint,
+                      onClick: () => { void actions.openStorage() },
+                    }, T.openStorage),
+                    state.storagePath?.dir
+                      ? h('span', {
+                        className: 'tn-hint tn-storage-path',
+                        title: state.storagePath.nodes,
+                      }, state.storagePath.dir)
+                      : null,
+                  ),
+                ),
                 h(NodeDetail, { node: selected, actions, workspaces: workspaceList }),
               ),
 
@@ -1206,6 +1254,31 @@ function createTodoNotePlugin(require) {
           } catch (error) {
             store.actions.clearPending('')
             return `${T.alignFailed}${error instanceof Error ? error.message : String(error)}`
+          }
+        },
+        /**
+         * Hand an absolute directory to the platform file manager through the
+         * shipped `open-in-app` routes (same-origin, cookie-authenticated).
+         * @param path - absolute directory to reveal.
+         * @returns whether a file manager accepted it.
+         */
+        openPath: async (path) => {
+          const app = ['explorer', 'finder', 'filemanager']
+          try {
+            const listed = await fetch('open-in-app/apps', { headers: { accept: 'application/json' } })
+            if (!listed.ok) return false
+            const payload = await listed.json()
+            const available = Array.isArray(payload?.apps) ? payload.apps : []
+            const chosen = app.find((id) => available.includes(id))
+            if (chosen === undefined) return false
+            const opened = await fetch('open-in-app/open', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ app: chosen, path }),
+            })
+            return opened.ok
+          } catch {
+            return false
           }
         },
       })

@@ -3,8 +3,9 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 
-import { createTodoCore, normalizeNode, LIMITS } from '../src/host.js'
+import { createTodoCore, normalizeNode, storagePaths, LIMITS } from '../src/host.js'
 import { SECTIONS } from '../src/prompt.js'
 
 /**
@@ -435,4 +436,15 @@ test('stored records are normalized on read, and unusable ones are dropped', asy
   assert.equal(node.id, 'key-1')
   assert.equal(node.status, 'active')
   assert.deepEqual(node.refine.history, [])
+})
+
+test('the reported storage path follows DSH_HOME, falling back to ~/.dsh', () => {
+  assert.equal(storagePaths({ DSH_HOME: 'D:/custom' }, '/home/me').dir, join('D:/custom', 'storages'))
+  assert.equal(storagePaths({}, '/home/me').dir, join('/home/me', '.dsh', 'storages'))
+  assert.equal(storagePaths({ DSH_HOME: '   ' }, '/home/me').dir, join('/home/me', '.dsh', 'storages'))
+  assert.equal(storagePaths({ DSH_HOME: '~/elsewhere' }, '/home/me').dir, join('/home/me', 'elsewhere', 'storages'))
+  const paths = storagePaths({}, '/home/me')
+  assert.equal(paths.nodes, join(paths.dir, 'todonote.json'))
+  assert.equal(paths.settings, join(paths.dir, 'todonote-settings.json'))
+  assert.equal(typeof paths.nodesExists, 'boolean')
 })

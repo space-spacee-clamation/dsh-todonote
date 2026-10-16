@@ -12,6 +12,10 @@
  * @module dsh-todonote
  */
 
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
 import { SECTIONS, SYSTEM_PROMPT, buildUserPrompt, missingSections } from './prompt.js'
 
 /** Cordis plugin name; also the service key provided to other plugins. */
@@ -182,6 +186,34 @@ function sleep(ms) {
 function deriveTitle(body) {
   const line = String(body ?? '').split('\n').map((entry) => entry.trim()).find((entry) => entry.length > 0) ?? ''
   return line.replace(/^#+\s*/, '').slice(0, LIMITS.title)
+}
+
+/**
+ * Where this plugin's bytes live. The JSON backend keeps one file per unit at
+ * `<root>/<unit name>.json`, and its root is `$DSH_HOME/storages` — an empty or
+ * whitespace-only `DSH_HOME` counts as unset, and a leading `~` is the home
+ * directory (the same precedence the harness itself uses).
+ * @param env - environment mapping; `DSH_HOME` is read from it.
+ * @param home - the user's home directory.
+ * @returns absolute paths plus whether each file exists yet.
+ */
+export function storagePaths(env = process.env, home = homedir()) {
+  const configured = typeof env?.DSH_HOME === 'string' ? env.DSH_HOME.trim() : ''
+  const root = configured.length === 0
+    ? join(home, '.dsh')
+    : configured.startsWith('~')
+      ? join(home, configured.slice(1))
+      : configured
+  const dir = join(root, 'storages')
+  const nodes = join(dir, `${UNIT.name}.json`)
+  const settings = join(dir, `${META_UNIT.name}.json`)
+  return {
+    dir,
+    nodes,
+    settings,
+    nodesExists: existsSync(nodes),
+    settingsExists: existsSync(settings),
+  }
 }
 
 /**
@@ -844,6 +876,7 @@ export function apply(ctx, config) {
       case 'refine': return core.refine(payload)
       case 'models': return core.catalog()
       case 'settings/set': return core.saveSettings(payload)
+      case 'storage/path': return storagePaths()
       default: throw new Error(`未知的便签操作：${endpoint}`)
     }
   }
