@@ -109,6 +109,10 @@ function createTodoNotePlugin(require) {
     settingsAlignHint: '「去工作区对齐」时，这段话会放在计划前面一起填进新会话的输入框（不会自动发送）。留空就用默认的那句。',
     align: '去工作区对齐',
     alignHint: '在当前绑定的工作区新开一个会话，把这段话填进输入框，按不按发送由你决定。',
+    refineInSession: '去工作区完善',
+    refineInSessionHint: '在便签绑定的工作区开一个会话：AI 在那边只读调研，然后用工具把五节补充直接写回这张便签，全程可看。',
+    refineInSessionNeedsWorkspace: '先给这条便签绑定工作区，才能在对应会话里完善。',
+    refineInSessionReady: '已在工作区会话里备好调研指令：按回车发送，AI 会用工具把五节写回便签。',
     alignNeedsWorkspace: '这条便签没有绑定工作区，先在标题下面绑一个。',
     alignUnsupported: '当前客户端没有工作区导航能力，无法跳转。',
     alignFailed: '跳转失败：',
@@ -599,6 +603,27 @@ function createTodoNotePlugin(require) {
       },
 
       /**
+       * Send the note to a session in its own workspace so the agent can look
+       * around there and then write the five sections back through the plugin's
+       * tool. The composer is pre-filled; the human sends it and watches.
+       * @param node - the note to refine in a session.
+       */
+      refineInSession(node) {
+        const workspaceId = String(node?.workspaceId ?? '')
+        if (workspaceId.length === 0) {
+          notice(T.refineInSessionNeedsWorkspace)
+          return
+        }
+        const preset = source.getSnapshot().preferences?.alignPrompt ?? ''
+        const result = deps.jump(workspaceId, composeSessionRefinePrompt(node, preset))
+        if (result !== true) {
+          notice(result)
+          return
+        }
+        notice(T.refineInSessionReady)
+      },
+
+      /**
        * Hand this note to a session in its workspace, with the preset line and
        * the note queued for the composer. Nothing is sent.
        * @param node - the note to align on.
@@ -738,6 +763,11 @@ function createTodoNotePlugin(require) {
         h('div', { className: 'tn-detail-actions' },
           h(Button, {
             variant: 'primary',
+            disabled: !node.workspaceId,
+            title: node.workspaceId ? T.refineInSessionHint : T.refineInSessionNeedsWorkspace,
+            onClick: () => actions.refineInSession(node),
+          }, T.refineInSession),
+          h(Button, {
             disabled: !node.workspaceId,
             title: node.workspaceId ? T.alignHint : T.alignNeedsWorkspace,
             onClick: () => actions.alignToWorkspace(node),

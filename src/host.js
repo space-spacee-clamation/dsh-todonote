@@ -16,7 +16,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { SECTIONS, SYSTEM_PROMPT, buildUserPrompt, missingSections } from './prompt.js'
+import { SECTIONS, SYSTEM_PROMPT, REFINE_TOOL, buildUserPrompt, missingSections } from './prompt.js'
 
 /** Cordis plugin name; also the service key provided to other plugins. */
 export const name = 'todoNote'
@@ -180,6 +180,25 @@ function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
   })
+}
+
+/**
+ * Cut a model answer at the first tool-call marker.
+ *
+ * The enrichment call carries no tools, but a model that expects to investigate
+ * can still emit the provider's tool-call markup as plain text (DeepSeek's DSML
+ * blocks, `<tool_call>`, `<invoke>`, …). Everything from that marker on is
+ * tool arguments rather than an answer, so it is dropped — and the caller can
+ * tell the user what happened instead of storing the markup as a refinement.
+ * @param text - the raw streamed answer.
+ * @returns the safe prefix plus whether a tool attempt was seen.
+ */
+export function stripToolMarkup(text) {
+  const value = typeof text === 'string' ? text : ''
+  const marker = /<[^>]{0,24}DSML[^>]{0,24}>|<\/?(?:tool_calls?|function_calls?|invoke|parameter)\b[^>]*>|<\|tool_call\|>/i
+  const hit = marker.exec(value)
+  if (hit === null) return { text: value, toolAttempted: false }
+  return { text: value.slice(0, hit.index), toolAttempted: true, rest: value.length - hit.index }
 }
 
 /** @param body - the user's text. @returns {string} a title derived from its first line. */
@@ -458,13 +477,23 @@ export function createTodoCore({ getStorage, getLlm, getDefaultModel, logger, co
         }
       }
       if (failure) throw new Error(failure)
-      const content = pieces.join('').trim()
+      const raw = pieces.join('')
+      const cleaned = stripToolMarkup(raw)
+      const content = cleaned.text.trim()
       if (content.length === 0) {
-        throw new Error(finishKind === 'max-tokens'
-          ? `模型没有返回正文：输出上限（maxTokens=${maxTokens}）被推理占满了，把配置里的 maxTokens 调大后重试`
-          : `模型没有返回正文（finish=${finishKind || 'unknown'}，推理片段 ${reasoningChars} 字）`)
+        throw new Error(cleaned.toolAttempted
+          ? '模型想调用工具（它试图去看工作区或执行命令），而不是按五节补充。'
+            + '「去工作区完善」会在绑定工作区的会话里做这件事；就地完善请换个模型或重试'
+          : finishKind === 'max-tokens'
+            ? `模型没有返回正文：输出上限（maxTokens=${maxTokens}）被推理占满了，把配置里的 maxTokens 调大后重试`
+            : `模型没有返回正文（finish=${finishKind || 'unknown'}，推理片段 ${reasoningChars} 字）`)
       }
       const missing = missingSections(content)
+      if (missing.length === SECTIONS.length) {
+        throw new Error(cleaned.toolAttempted
+          ? '模型只给了工具调用和一句开场白，没有五节内容。可以点「去工作区完善」让它到工作区里调研后用工具写回'
+          : '模型没有按五节格式回答（一节都没有），这次结果没有写回便签；可以重试或换个模型')
+      }
       const previous = node.refine.content
       const history = previous.trim().length > 0
         ? [...node.refine.history, { content: previous, at: node.refine.at, provider: node.refine.provider, model: node.refine.model }].slice(-LIMITS.history)
@@ -825,6 +854,53 @@ export function createTodoCore({ getStorage, getLlm, getDefaultModel, logger, co
       return clone(node)
     },
 
+    /**
+     * Write a five-section answer produced by a session tool call.
+     *
+     * Same commit path as the one-shot call, so the console reacts identically;
+     * the only difference is who produced the text and that a badly shaped
+     * answer is reported back to the model instead of being stored.
+     * @param payload - `id`, `markdown`, and optional `provider`/`model`.
+     * @returns `{ok, missing, warning}` — the model sees this as the tool result.
+     */
+    async applyRefinement(payload) {
+      const input = asObject(payload)
+      const node = nodes.get(text(input.id, 200))
+      if (node === undefined) {
+        return { ok: false, missing: [...SECTIONS], warning: '便签不存在（可能已被删除或 id 传错了）' }
+      }
+      const cleaned = stripToolMarkup(text(input.markdown, LIMITS.content))
+      const content = cleaned.text.trim()
+      const missing = missingSections(content)
+      if (content.length === 0 || missing.length === SECTIONS.length) {
+        return {
+          ok: false,
+          missing,
+          warning: '回答里一节都没识别到：markdown 要用 ## 背景 / ## 边界 / ## 影响面 / ## 成本 / ## 预期效果 五个二级标题',
+        }
+      }
+      const previous = node.refine.content
+      const history = previous.trim().length > 0
+        ? [...node.refine.history, { content: previous, at: node.refine.at, provider: node.refine.provider, model: node.refine.model }].slice(-LIMITS.history)
+        : node.refine.history
+      node.refine = {
+        status: 'done',
+        content,
+        provider: text(input.provider, 80),
+        model: text(input.model, 200),
+        at: now(),
+        error: '',
+        warning: missing.length > 0 ? `模型漏了小节：${missing.join('、')}` : '',
+        startedAt: node.refine.startedAt,
+        history,
+      }
+      node.updatedAt = now()
+      await persist(node)
+      notify()
+      logger?.info?.(`todonote: 会话写回便签「${node.title}」（${content.length} 字）`)
+      return { ok: true, missing, warning: node.refine.warning }
+    },
+
     /** @returns {boolean} whether the core is shutting down. */
     get closed() {
       return closed
@@ -935,4 +1011,61 @@ export function apply(ctx, config) {
       }
     },
   }), `todonote: ${CHANNEL} route`)
+
+  // The session-side half of "AI 完善": a workspace session investigates and
+  // then calls this to write its five-section answer back. Registered through
+  // `ctx.get` so a profile without the tools service still loads the plugin.
+  const tools = ctx.get('tools')
+  if (tools === undefined || tools === null || typeof tools.register !== 'function') {
+    ctx.logger?.warn?.('todonote: tools 服务不可用，会话写回工具没有注册（就地完善不受影响）')
+    return
+  }
+  ctx.effect(() => tools.register({
+    name: REFINE_TOOL,
+    description: '把「计划便签」的补充写回指定便签：markdown 必须包含 ## 背景 / ## 边界 / ## 影响面 / '
+      + '## 成本 / ## 预期效果 五节。只写回分析结论，不改动用户原文。调研完成后调用一次。',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '目标便签的 id（提示词里给出的那一串）。' },
+        markdown: {
+          type: 'string',
+          description: '完整五节 Markdown：## 背景 / ## 边界 / ## 影响面 / ## 成本 / ## 预期效果。',
+        },
+      },
+      required: ['id', 'markdown'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean', description: '是否已写回便签。' },
+          missing: { type: 'array', items: { type: 'string' }, description: '没有识别到的小节。' },
+          warning: { type: 'string', description: '写回结果或需要补齐的内容。' },
+        },
+        required: ['ok', 'missing', 'warning'],
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.ok === true
+          ? `已写回计划便签${value.warning === '' ? '' : `（${value.warning}）`}。`
+          : `没有写回：${value.warning}`
+            + (Array.isArray(value.missing) && value.missing.length > 0 ? ` 缺少：${value.missing.join('、')}` : ''),
+      }],
+    },
+    execute: async (args, exec) => {
+      let provider = ''
+      let model = ''
+      try {
+        const selection = exec?.agent?.session?.projections?.faceOf?.('modelSelection')?.getSnapshot?.()
+        const chosen = selection?.next ?? selection?.lastUsed
+        provider = text(chosen?.provider, 80)
+        model = text(chosen?.model, 200)
+      } catch {
+        // The model label is cosmetic in the note; a missing projection is fine.
+      }
+      return core.applyRefinement({ ...asObject(args), provider, model })
+    },
+    presentCall: args => ({ card: 'generic', title: '写回计划便签', kind: 'other', rawInput: args }),
+  }), 'todonote: session write-back tool')
 }

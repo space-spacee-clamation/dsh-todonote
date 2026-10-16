@@ -16,8 +16,10 @@ export const SYSTEM_PROMPT = `你是「计划便签」的完善助手。用户�
 
 必须遵守：
 1. 只做调查、分析和补充。绝不执行任何实际工作：不写代码、不改文件、不跑命令、不安装依赖、不给出"我已经完成"之类的表述。
-2. 绝不改写、删减、替换或"优化"用户的原文。你的输出是独立的补充内容，用户原文保持原样。
-3. 不确定的地方不要编造，写成"待确认"并给出需要向谁/在哪里确认。
+2. **你没有可调用的工具**：不要输出任何工具调用语法（例如 DSML、<tool_call>、<invoke>、<function_calls> 这类标记），也不要试图列出目录、读取文件或运行命令。需要了解的现状，写成"待确认"。
+3. 绝不改写、删减、替换或"优化"用户的原文。你的输出是独立的补充内容，用户原文保持原样。
+4. 不确定的地方不要编造，写成"待确认"并给出需要向谁/在哪里确认。
+5. 回答必须完整包含下面五节；缺任何一节都算没做完。
 
 输出格式：Markdown，严格使用下面五个二级标题，顺序固定，一个都不能少，也不要增加其它同级标题：
 
@@ -80,6 +82,46 @@ export function missingSections(text) {
  * in its workspace. Overridable from the console's settings.
  */
 export const DEFAULT_ALIGN_PROMPT = '和我对齐下面的计划，进行基础的调研和理解，不要改代码'
+
+/**
+ * The tool a workspace session calls to write its five-section answer back into
+ * the note. Shared so the host registration and the prompt cannot drift.
+ */
+export const REFINE_TOOL = 'todonote_write_refinement'
+
+/**
+ * Compose the instruction a "去工作区完善" jump pre-fills: the session opens in
+ * the note's own workspace, investigates there, and calls {@link REFINE_TOOL}
+ * to write the answer back. The human sends it and can watch the work.
+ * @param node - the stored node.
+ * @param preset - the configured preset line; empty falls back to the default.
+ * @returns the composer text.
+ */
+export function composeSessionRefinePrompt(node, preset) {
+  const head = typeof preset === 'string' && preset.trim().length > 0 ? preset.trim() : DEFAULT_ALIGN_PROMPT
+  const parts = [
+    head,
+    '',
+    `便签 id：${node.id}`,
+    `标题：${node.title || '（未命名）'}`,
+    '',
+    '我的内容：',
+    '---',
+    node.body && node.body.trim().length > 0 ? node.body : '（还没有写正文）',
+    '---',
+    '',
+    '请**只读地**看一眼这个工作区（目录结构、相关文件）来补充事实：不要运行命令、不要改任何文件、不要提交改动；',
+    '环境不给看或者不需要看，就直接根据便签内容写。',
+    '',
+    `然后调用一次工具 ${REFINE_TOOL} 把补充写回上面这张便签：`,
+    '',
+    `- id 传 ${node.id}`,
+    '- markdown 传完整五节：## 背景 / ## 边界 / ## 影响面 / ## 成本 / ## 预期效果',
+    '',
+    '只做调研和补充，不写代码。',
+  ]
+  return parts.join('\n')
+}
 
 /**
  * Compose the text a "去工作区对齐" jump pre-fills into the new session's

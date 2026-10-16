@@ -701,7 +701,7 @@ test('the detail header rebinds a note to a workspace without opening the editor
   assert.equal(face.hooks.todo.getSnapshot().notice, '已取消工作区绑定')
 })
 
-test('the list footer reveals the storage folder through the shipped route', async () => {
+test('the storage button reveals the folder through the shipped route', async () => {
   const originalFetch = globalThis.fetch
   const requests = []
   globalThis.fetch = async (input, init) => {
@@ -748,4 +748,37 @@ test('without a file manager the storage path lands on the clipboard', async () 
   await face.todo.openStorage()
   assert.deepEqual(clipboard.writes.at(-1), '/tmp/todonote-storages')
   assert.match(face.hooks.todo.getSnapshot().notice, /已复制存储目录/)
+})
+
+test('去工作区完善 opens a session carrying the write-back instruction', async () => {
+  const harness = boot({
+    state: () => ({ nodes: [NODE], total: 1, truncated: false, storage: { ok: true, backend: 'json', error: '' }, preferences: { provider: '', model: '', alignPrompt: '先和我对齐' } }),
+  })
+  const { face, tree } = await consoleOver(harness)
+  const button = findAll(tree, (node) => node.type === primitives.Button && textOf(node).join('') === '去工作区完善')[0]
+  assert.ok(button, 'the session refine action is rendered')
+  assert.equal(button.props.disabled, false)
+  button.props.onClick()
+
+  assert.equal(harness.jumps.length, 1)
+  assert.equal(harness.jumps[0].workspaceId, 'ws-1')
+  const queued = face.hooks.todo.getSnapshot().pendingPrompt
+  assert.ok(queued.startsWith('先和我对齐'), 'the configured preset leads')
+  assert.match(queued, /todonote_write_refinement/)
+  assert.match(queued, /便签 id：n1/)
+  assert.match(queued, /我自己的原文/)
+  assert.match(face.hooks.todo.getSnapshot().notice, /按回车发送/)
+})
+
+test('去工作区完善 is refused without a bound workspace', async () => {
+  const unbound = { ...NODE, workspaceId: '', workspaceTitle: '', workspacePath: '' }
+  const harness = boot({
+    state: () => ({ nodes: [unbound], total: 1, truncated: false, storage: { ok: true, backend: 'json', error: '' }, preferences: { provider: '', model: '', alignPrompt: '' } }),
+  })
+  const { face, tree } = await consoleOver(harness, unbound)
+  const button = findAll(tree, (node) => node.type === primitives.Button && textOf(node).join('') === '去工作区完善')[0]
+  assert.equal(button.props.disabled, true)
+  button.props.onClick()
+  assert.equal(harness.jumps.length, 0)
+  assert.match(face.hooks.todo.getSnapshot().notice, /先给这条便签绑定工作区/)
 })

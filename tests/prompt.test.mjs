@@ -5,7 +5,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { SECTIONS, SYSTEM_PROMPT, DEFAULT_ALIGN_PROMPT, buildUserPrompt, composePlanPrompt, missingSections, composeNodeText } from '../src/prompt.js'
+import { SECTIONS, SYSTEM_PROMPT, DEFAULT_ALIGN_PROMPT, REFINE_TOOL, buildUserPrompt, composePlanPrompt, composeSessionRefinePrompt, missingSections, composeNodeText } from '../src/prompt.js'
 
 test('the five sections are fixed and ordered', () => {
   assert.deepEqual(SECTIONS, ['背景', '边界', '影响面', '成本', '预期效果'])
@@ -82,4 +82,26 @@ test('a configured preset replaces the default, and an empty one falls back', ()
   assert.ok(composePlanPrompt(node, '先看影响面').startsWith('先看影响面\n\n'))
   assert.ok(composePlanPrompt(node, '   ').startsWith(DEFAULT_ALIGN_PROMPT))
   assert.doesNotMatch(composePlanPrompt({ title: 'x', body: '' }), /## AI 完善/)
+})
+
+test('the session-refine prompt names the note and the write-back tool', () => {
+  const text = composeSessionRefinePrompt({
+    id: 'node-42',
+    title: '接入审计日志',
+    body: '我自己的原文',
+  }, '先和我对齐')
+  assert.ok(text.startsWith('先和我对齐\n\n'))
+  assert.match(text, /便签 id：node-42/)
+  assert.match(text, /我自己的原文/)
+  assert.match(text, new RegExp(REFINE_TOOL))
+  assert.match(text, /- id 传 node-42/)
+  for (const section of SECTIONS) assert.match(text, new RegExp(`## ${section}`))
+  assert.match(text, /不要运行命令/)
+  assert.match(text, /不要改任何文件/)
+})
+
+test('the system prompt tells the model it has no tools at all', () => {
+  assert.match(SYSTEM_PROMPT, /没有可调用的工具/)
+  assert.match(SYSTEM_PROMPT, /DSML/)
+  assert.match(SYSTEM_PROMPT, /缺任何一节都算没做完/)
 })

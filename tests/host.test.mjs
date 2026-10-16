@@ -5,7 +5,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 
-import { createTodoCore, normalizeNode, storagePaths, LIMITS } from '../src/host.js'
+import { createTodoCore, normalizeNode, storagePaths, stripToolMarkup, LIMITS } from '../src/host.js'
 import { SECTIONS } from '../src/prompt.js'
 
 /**
@@ -447,4 +447,113 @@ test('the reported storage path follows DSH_HOME, falling back to ~/.dsh', () =>
   assert.equal(paths.nodes, join(paths.dir, 'todonote.json'))
   assert.equal(paths.settings, join(paths.dir, 'todonote-settings.json'))
   assert.equal(typeof paths.nodesExists, 'boolean')
+})
+
+const DSML_ATTEMPT = '我先看一下这个工作区的现状，再补充便签内容。\n\n'
+  + '<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="Bash"> <｜｜DSML｜｜ parameter name="command">dir /b</｜｜DSML｜｜ parameter> '
+  + '</｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>'
+
+test('tool markup is cut off and reported instead of being stored', () => {
+  const plain = stripToolMarkup('## 背景\n- 一条要点')
+  assert.equal(plain.toolAttempted, false)
+  assert.equal(plain.text, '## 背景\n- 一条要点')
+
+  const cut = stripToolMarkup(DSML_ATTEMPT)
+  assert.equal(cut.toolAttempted, true)
+  assert.equal(cut.text, '我先看一下这个工作区的现状，再补充便签内容。\n\n')
+  assert.doesNotMatch(cut.text, /DSML|invoke|dir \/b/)
+
+  const sectionsThenTool = stripToolMarkup(`## 背景\n- 有内容\n\n${DSML_ATTEMPT}`)
+  assert.equal(sectionsThenTool.toolAttempted, true)
+  assert.match(sectionsThenTool.text, /## 背景/)
+
+  for (const marker of ['<tool_calls>', '<tool_call>', '<function_calls>', '<invoke name="x">', '<|tool_call|>']) {
+    assert.equal(stripToolMarkup(`正文\n${marker}`).toolAttempted, true, marker)
+  }
+})
+
+test('a model that tries to call a tool fails the refinement instead of writing junk', async () => {
+  const llm = createFakeLlm({ chunks: [
+    { type: 'text-delta', index: 0, text: DSML_ATTEMPT },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ] })
+  const { core } = await makeCore({ llm })
+  const node = await core.create({ title: '客户端改造', body: '我写的原文' })
+  await core.refine({ id: node.id })
+  await waitFor(() => core.snapshot().nodes[0].refine.status !== 'running')
+  const refine = core.snapshot().nodes[0].refine
+  assert.equal(refine.status, 'error')
+  assert.match(refine.error, /工具/)
+  assert.equal(refine.content, '', 'no markup is stored as a refinement')
+  assert.equal(core.snapshot().nodes[0].body, '我写的原文')
+  await core.close()
+})
+
+test('an answer with no section at all is refused, keeping the previous one', async () => {
+  const good = createFakeLlm()
+  const storage = createFakeStorage()
+  const first = await makeCore({ storage, llm: good })
+  const node = await first.core.create({ title: 'x', body: 'y' })
+  await first.core.refine({ id: node.id })
+  await waitFor(() => first.core.snapshot().nodes[0].refine.status === 'done')
+  const kept = first.core.snapshot().nodes[0].refine.content
+  await first.core.close()
+
+  const prose = createFakeLlm({ chunks: [
+    { type: 'text-delta', index: 0, text: '好的，我先理解一下你的想法。' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ] })
+  const second = createTodoCore({
+    getStorage: () => storage.storage,
+    getLlm: () => prose,
+    logger: { info() {}, warn() {} },
+    config: {},
+  })
+  await second.start()
+  await second.refine({ id: node.id })
+  await waitFor(() => second.snapshot().nodes[0].refine.status !== 'running')
+  const refine = second.snapshot().nodes[0].refine
+  assert.equal(refine.status, 'error')
+  assert.match(refine.error, /五节/)
+  assert.equal(refine.content, kept, 'the earlier refinement survives a bad run')
+  await second.close()
+})
+
+test('the session tool writes the five sections back into the note', async () => {
+  const { core } = await makeCore()
+  const node = await core.create({ title: '会话写回', body: '我的原文' })
+  const markdown = SECTIONS.map((section) => `## ${section}\n- 一条要点`).join('\n\n')
+  const result = await core.applyRefinement({ id: node.id, markdown, provider: 'codemaker', model: 'deepseek-v4-pro' })
+  assert.deepEqual(result, { ok: true, missing: [], warning: '' })
+  const stored = core.snapshot().nodes[0]
+  assert.equal(stored.refine.status, 'done')
+  assert.match(stored.refine.content, /## 预期效果/)
+  assert.equal(stored.refine.model, 'deepseek-v4-pro')
+  assert.equal(stored.body, '我的原文', 'the user text is untouched')
+  await core.close()
+})
+
+test('the session tool reports a bad answer back instead of storing it', async () => {
+  const { core } = await makeCore()
+  const node = await core.create({ title: 'x', body: 'y' })
+  const missingOne = await core.applyRefinement({
+    id: node.id,
+    markdown: '## 背景\n- 只有背景',
+  })
+  assert.equal(missingOne.ok, true, 'a partial answer is stored with a warning')
+  assert.deepEqual(missingOne.missing, ['边界', '影响面', '成本', '预期效果'])
+  assert.match(missingOne.warning, /边界/)
+
+  const garbage = await core.applyRefinement({ id: node.id, markdown: '我先看看这个工作区。' })
+  assert.equal(garbage.ok, false)
+  assert.deepEqual(garbage.missing, SECTIONS)
+  assert.match(garbage.warning, /五节|二级标题/)
+
+  const unknown = await core.applyRefinement({ id: 'nope', markdown: '## 背景' })
+  assert.equal(unknown.ok, false)
+  assert.match(unknown.warning, /便签不存在/)
+
+  const empty = await core.applyRefinement({ id: node.id, markdown: '   ' })
+  assert.equal(empty.ok, false)
+  await core.close()
 })
