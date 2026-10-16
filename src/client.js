@@ -1,0 +1,1138 @@
+/**
+ * TodoNote — browser half (source).
+ *
+ * This file is NOT a module: tools/build.mjs inlines it into the
+ * `window.__ModuleLoader__.load({ id, factory })` closure that the DSH client
+ * module system serves, exactly like a shipped `lib/client.js`. It may use only
+ * the platform modules the shell seeds (react, react-dom,
+ * @deepseek-ai/dsh-client-ui-primitives, …).
+ *
+ * Surfaces registered here:
+ *   - `main` (keyed by PANEL_ID)  — the 监控台 console page
+ *   - `sidebar.panellist`         — the console's sidebar glyph
+ *   - `shell.overlay`             — the floating ball + quick create + toast
+ *
+ * The `SECTIONS` / `composeNodeText` symbols come from src/prompt.js, inlined
+ * by the build so the copy format cannot drift from the prompt.
+ */
+
+function createTodoNotePlugin(require) {
+  const React = require('react')
+  const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
+  const h = React.createElement
+
+  const {
+    Button,
+    Input,
+    Modal,
+    SegmentedTabs,
+    MarkdownText,
+    writeClipboard,
+    IconChecklistOutlineRegular,
+    IconPlusOutlineRegular,
+    IconArchiveOutlineRegular,
+  } = primitives
+
+  /** Sidebar row id and the `main` dispatch key — the SAME string in both. */
+  const PANEL_ID = 'todonote'
+  /** Absolute Connection channel registered by the Host half. */
+  const RPC_CHANNEL = '/todonote'
+  /** Where the ball remembers its dragged position. */
+  const POSITION_KEY = 'dsh-todonote.ball-position'
+  /** How often a running enrichment is polled. */
+  const POLL_MS = 2000
+
+  /** All user-visible copy lives here. */
+  const T = {
+    panel: '计划便签',
+    title: '计划便签',
+    subtitle: '碎屑工作先记下来，需要时让 AI 只做补充',
+    create: '新建计划',
+    refresh: '刷新',
+    active: '进行中',
+    archived: '已归档',
+    viewLabel: '便签视图',
+    empty: '这里还是空的。点「新建计划」写一条，或者用会话右下角的小圆球。',
+    emptyArchived: '还没有归档的便签。归档后的便签会留在这里，随时可以翻回来。',
+    untitled: '未命名计划',
+    noBody: '（还没有写内容）',
+    mine: '我的内容',
+    ai: 'AI 完善',
+    aiIdle: '还没有完善过。点「AI 完善」让模型按 背景 / 边界 / 影响面 / 成本 / 预期效果 补充一版。',
+    aiRunning: 'AI 正在完善…（只做调查补充，不会执行任何操作）',
+    aiFailed: '完善失败',
+    refine: 'AI 完善',
+    refineAgain: '重新完善',
+    refineHint: '这次补充的要求（可选）',
+    refineHintPlaceholder: '例如：重点看兼容性 / 只考虑两周内能做完的方案',
+    copy: '复制',
+    copied: '已复制到剪贴板',
+    copyFailed: '复制失败，请手动选择文本',
+    edit: '编辑',
+    archive: '归档',
+    unarchive: '取消归档',
+    remove: '删除',
+    removeConfirm: '再点一次删除',
+    cancel: '取消',
+    save: '保存',
+    saveAndRefine: '保存并完善',
+    close: '关闭',
+    workspace: '绑定工作区',
+    workspaceNone: '不绑定',
+    workspaceHint: '工作区只作为便签的归属和 AI 的上下文，不会在这里执行任何操作。',
+    quickTitle: '记一条',
+    quickPlaceholder: '想做什么？随手写，之后再完善。',
+    openConsole: '打开监控台',
+    storageDown: '存储不可用，便签不会保存：',
+    loading: '加载中…',
+    truncated: '（只显示最近 300 条）',
+    detailEmpty: '左边选一条便签。',
+    ball: '计划便签：记一条',
+    saved: '已保存',
+    archived2: '已归档',
+    unarchived: '已取消归档',
+    removed: '已删除',
+    model: '模型',
+    settings: '设置',
+    settingsTitle: '设置',
+    settingsModel: '「AI 完善」使用的模型',
+    settingsModelName: '模型',
+    followDefault: '跟随默认模型',
+    settingsHint: '选「跟随默认模型」就跟着 DSH 当前的默认模型走；这里选的会覆盖 profile 配置里的 provider/model，并保存在本机。',
+    settingsSavedPinned: '完善模型已设为',
+    settingsSavedDefault: '完善模型已改为跟随默认',
+    modelPinned: '完善模型',
+    modelFollowing: '完善模型：跟随默认',
+    catalogFailed: '读取模型列表失败：',
+    settingsAlign: '对齐提示词',
+    settingsAlignPlaceholder: '和我对齐下面的计划，进行基础的调研和理解，不要改代码',
+    settingsAlignHint: '「去工作区对齐」时，这段话会放在计划前面一起填进新会话的输入框（不会自动发送）。留空就用默认的那句。',
+    align: '去工作区对齐',
+    alignHint: '在当前绑定的工作区新开一个会话，把这段话填进输入框，按不按发送由你决定。',
+    alignNeedsWorkspace: '这条便签没有绑定工作区，先在编辑里绑一个。',
+    alignUnsupported: '当前客户端没有工作区导航能力，无法跳转。',
+    alignFailed: '跳转失败：',
+    alignFilling: '正在把计划填进输入框…',
+    alignFilled: '计划已填进输入框（不会自动发送）',
+    alignNoPrefill: '这个客户端没有提供输入框填充能力，计划没有填进去。',
+  }
+
+  const CSS = `
+.tn-page{display:flex;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;
+  color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);font-size:14px;line-height:1.6}
+.tn-scroll{flex:1;min-height:0;overflow:auto;scrollbar-gutter:stable}
+.tn-content{max-width:960px;margin:0 auto;padding:0 clamp(24px,4vw,48px) 48px}
+.tn-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-top:28px;margin-bottom:14px}
+.tn-head h1{font-size:20px;line-height:28px;margin:0}
+.tn-sub{color:var(--dsw-alias-label-tertiary);font-size:12px;margin-top:2px}
+.tn-head-actions{display:flex;gap:8px;flex-shrink:0}
+.tn-tabs{margin-bottom:16px}
+.tn-warn{margin-bottom:14px;padding:8px 12px;border-radius:var(--dsw-radius-md,12px);
+  background:var(--dsw-alias-state-error-secondary);color:var(--dsw-alias-state-error-primary);font-size:12px}
+.tn-split{display:grid;grid-template-columns:minmax(190px,250px) minmax(0,1fr);gap:20px;align-items:start}
+.tn-list{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tn-card{display:block;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer;
+  border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);
+  border-radius:var(--dsw-radius-md,12px);padding:9px 11px}
+.tn-card:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.tn-card[data-active='true']{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-interactive-bg-hover-accent)}
+.tn-card-title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tn-card-meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:3px;
+  color:var(--dsw-alias-label-tertiary);font-size:11px}
+.tn-detail{border:0;background:var(--dsw-alias-bg-layer-2);box-shadow:var(--dsw-elevation-panel);
+  border-radius:var(--dsw-radius-lg,16px);padding:16px 18px;min-width:0;min-height:200px}
+.tn-detail h2{margin:0;font-size:16px;line-height:24px;word-break:break-word}
+.tn-detail-meta{color:var(--dsw-alias-label-tertiary);font-size:12px;margin-top:4px;word-break:break-all}
+.tn-label{font-size:12px;color:var(--dsw-alias-label-tertiary);margin:16px 0 6px;letter-spacing:.02em}
+.tn-body{white-space:pre-wrap;word-break:break-word;color:var(--dsw-alias-label-primary)}
+.tn-body-empty{color:var(--dsw-alias-label-dimmed)}
+.tn-ai{color:var(--dsw-alias-label-primary)}
+.tn-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.tn-danger{color:var(--dsw-alias-state-error-primary)}
+.tn-empty{color:var(--dsw-alias-label-tertiary);padding:28px 0;text-align:center}
+.tn-field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+.tn-field-label{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.tn-textarea,.tn-select,.tn-input{width:100%;box-sizing:border-box;font:inherit;color:var(--dsw-alias-label-primary);
+  background:var(--dsw-alias-bg-layer-1);border:0.5px solid var(--dsw-alias-border-l3);
+  border-radius:var(--dsw-radius-md,12px);padding:8px 10px}
+.tn-textarea{min-height:110px;resize:vertical;line-height:1.5}
+.tn-textarea:focus,.tn-select:focus,.tn-input:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}
+.tn-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.tn-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}
+.tn-ball-root{position:fixed;z-index:40;pointer-events:none}
+.tn-ball{width:40px;height:40px;padding:0;border:0;border-radius:50%;corner-shape:round;
+  display:flex;align-items:center;justify-content:center;cursor:grab;touch-action:none;
+  pointer-events:auto;color:var(--dsw-alias-label-primary-foreground,#fff);
+  background:var(--dsw-alias-brand-primary);box-shadow:var(--dsw-elevation-prominent);
+  -webkit-app-region:no-drag;transition:transform var(--ds-transition-duration,120ms) var(--ds-ease-in-out,ease)}
+.tn-ball:hover{transform:scale(1.06)}
+.tn-ball:active{cursor:grabbing}
+.tn-quick{position:fixed;z-index:41;width:min(320px,calc(100vw - 32px));pointer-events:auto;
+  border:0;background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-2));
+  box-shadow:var(--dsw-elevation-prominent);border-radius:var(--dsw-radius-lg,16px);padding:14px}
+.tn-quick-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+.tn-quick-head strong{font-size:13px;font-weight:600}
+.tn-quick-actions{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:4px}
+.tn-toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);z-index:42;pointer-events:none;
+  border:0;background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-2));color:var(--dsw-alias-label-primary);
+  box-shadow:var(--dsw-elevation-prominent);border-radius:var(--dsw-radius-md,12px);padding:8px 14px;font-size:13px}
+.tn-dock-hint{color:var(--dsw-alias-label-tertiary);font-size:12px;text-align:center;padding:4px 0}
+.tn-keep{white-space:pre-wrap;word-break:break-word}
+`
+
+  /** Inject the stylesheet once per page. */
+  function injectStyle() {
+    const id = 'dsh-todonote-style'
+    if (document.getElementById(id) !== null) return
+    const node = document.createElement('style')
+    node.id = id
+    node.textContent = CSS
+    document.head.appendChild(node)
+  }
+
+  /**
+   * One observable source with a stable snapshot identity between changes.
+   * @param initial - the first snapshot.
+   * @returns `{ getSnapshot, subscribe, set }`.
+   */
+  function createSource(initial) {
+    let snapshot = initial
+    const listeners = new Set()
+    return {
+      getSnapshot: () => snapshot,
+      subscribe(listener) {
+        listeners.add(listener)
+        return () => { listeners.delete(listener) }
+      },
+      set(patch) {
+        const next = { ...snapshot, ...patch }
+        snapshot = next
+        for (const listener of [...listeners]) {
+          try {
+            listener()
+          } catch {
+            // A broken render subscriber must not stop the data channel.
+          }
+        }
+      },
+    }
+  }
+
+  /** @returns {{x: number, y: number}} the stored ball offset from the bottom-right corner. */
+  function readBallPosition() {
+    try {
+      const raw = window.localStorage.getItem(POSITION_KEY)
+      if (raw === null) return { x: 18, y: 24 }
+      const parsed = JSON.parse(raw)
+      const x = Number(parsed?.x)
+      const y = Number(parsed?.y)
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return { x: 18, y: 24 }
+      return { x: Math.max(0, Math.min(4000, x)), y: Math.max(0, Math.min(4000, y)) }
+    } catch {
+      return { x: 18, y: 24 }
+    }
+  }
+
+  /** @param position - the offset to remember. */
+  function storeBallPosition(position) {
+    try {
+      window.localStorage.setItem(POSITION_KEY, JSON.stringify(position))
+    } catch {
+      // A storage-denied page simply forgets the position.
+    }
+  }
+
+  /**
+   * Transport wrapper over the plugin's Connection channel: a business failure
+   * is a resolved `{ok:false}` result, never a rejection.
+   * @param connection - the client connection service.
+   * @returns a callable `(endpoint, payload) => Promise<value>`.
+   */
+  function createCaller(connection) {
+    return async function call(endpoint, payload) {
+      const rpc = connection?.rpc
+      if (rpc === undefined || typeof rpc.call !== 'function') throw new Error('连接服务不可用')
+      const result = await rpc.call(RPC_CHANNEL, endpoint, payload ?? {})
+      if (result?.ok === true) return result.value
+      if (result?.ok === false) throw new Error(result.error?.message ?? '操作失败')
+      throw new Error('连接返回了无法识别的内容')
+    }
+  }
+
+  /**
+   * Apply-scoped store: the console page and the floating ball share one source
+   * and one action set. Created inside `apply`, never at module level.
+   * @param call - the RPC caller.
+   * @param deps - `openConsole` switches the shell to the console panel;
+   * `jump(workspaceId, text)` opens a new session in that workspace with the
+   * text pre-filled, returning true or a message to show.
+   * @returns `{ source, actions, dispose }`.
+   */
+  function createTodoStore(call, deps) {
+    const source = createSource({
+      phase: 'loading',
+      error: '',
+      nodes: [],
+      total: 0,
+      truncated: false,
+      storage: { ok: true, backend: '', error: '' },
+      view: 'active',
+      selectedId: '',
+      editor: null,
+      settingsOpen: false,
+      settingsDraft: { provider: '', model: '', alignPrompt: '' },
+      preferences: { provider: '', model: '', alignPrompt: '' },
+      catalog: null,
+      catalogError: '',
+      /** Plan text waiting to be dropped into the next session's composer. */
+      pendingPrompt: '',
+      notice: '',
+      noticeSeq: 0,
+      confirmingId: '',
+    })
+    let disposed = false
+    let pollTimer = null
+
+    /** @param text - the transient message to show. */
+    function notice(text) {
+      const current = source.getSnapshot()
+      source.set({ notice: text, noticeSeq: current.noticeSeq + 1 })
+    }
+
+    /** @returns the node the detail pane shows. */
+    function currentNode() {
+      const state = source.getSnapshot()
+      const visible = state.nodes.filter((node) => (state.view === 'archived' ? node.status === 'archived' : node.status === 'active'))
+      return visible.find((node) => node.id === state.selectedId) ?? visible[0]
+    }
+
+    /** Pull the full state and re-arm the poll while any refinement runs. */
+    async function refresh() {
+      if (disposed) return
+      try {
+        const value = await call('state', {})
+        if (disposed) return
+        const nodes = Array.isArray(value?.nodes) ? value.nodes : []
+        source.set({
+          phase: 'ready',
+          error: '',
+          nodes,
+          total: Number(value?.total ?? nodes.length),
+          truncated: value?.truncated === true,
+          storage: value?.storage ?? { ok: true, backend: '', error: '' },
+          preferences: value?.preferences ?? { provider: '', model: '', alignPrompt: '' },
+        })
+        if (nodes.some((node) => node?.refine?.status === 'running')) schedulePoll()
+      } catch (error) {
+        if (disposed) return
+        source.set({ phase: 'error', error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+
+    /** Poll again while the Host is still working on an enrichment. */
+    function schedulePoll() {
+      if (disposed || pollTimer !== null) return
+      pollTimer = setTimeout(() => {
+        pollTimer = null
+        void refresh()
+      }, POLL_MS)
+    }
+
+    /** Load the provider/model catalog the settings dialog offers. */
+    async function loadCatalog() {
+      try {
+        const value = await call('models', {})
+        if (disposed) return
+        source.set({ catalog: value ?? null, catalogError: '' })
+      } catch (error) {
+        if (disposed) return
+        source.set({ catalogError: error instanceof Error ? error.message : String(error) })
+      }
+    }
+
+    /** @param run - the operation to wrap with busy/notice handling. */
+    async function guard(run) {
+      try {
+        await run()
+      } catch (error) {
+        notice(error instanceof Error ? error.message : String(error))
+      }
+    }
+
+    const actions = {
+      refresh: () => refresh(),
+
+      select(id) {
+        source.set({ selectedId: String(id ?? ''), confirmingId: '' })
+      },
+
+      setView(view) {
+        source.set({ view: view === 'archived' ? 'archived' : 'active', selectedId: '', confirmingId: '' })
+      },
+
+      openCreate(prefill) {
+        source.set({
+          editor: {
+            mode: 'create',
+            id: '',
+            title: '',
+            body: '',
+            hint: '',
+            workspaceId: String(prefill?.workspaceId ?? ''),
+            workspaceTitle: String(prefill?.workspaceTitle ?? ''),
+            workspacePath: String(prefill?.workspacePath ?? ''),
+            refineAfterSave: false,
+          },
+        })
+      },
+
+      openEdit(node) {
+        if (node === undefined || node === null) return
+        source.set({
+          editor: {
+            mode: 'edit',
+            id: String(node.id ?? ''),
+            title: String(node.title ?? ''),
+            body: String(node.body ?? ''),
+            hint: '',
+            workspaceId: String(node.workspaceId ?? ''),
+            workspaceTitle: String(node.workspaceTitle ?? ''),
+            workspacePath: String(node.workspacePath ?? ''),
+            refineAfterSave: false,
+          },
+        })
+      },
+
+      patchEditor(patch) {
+        const state = source.getSnapshot()
+        if (state.editor === null) return
+        source.set({ editor: { ...state.editor, ...patch } })
+      },
+
+      bindWorkspace(workspace) {
+        const state = source.getSnapshot()
+        if (state.editor === null) return
+        source.set({
+          editor: {
+            ...state.editor,
+            workspaceId: String(workspace?.workspaceId ?? ''),
+            workspaceTitle: String(workspace?.title ?? ''),
+            workspacePath: String(workspace?.path ?? ''),
+          },
+        })
+      },
+
+      closeEditor() {
+        source.set({ editor: null })
+      },
+
+      async save() {
+        const state = source.getSnapshot()
+        const editor = state.editor
+        if (editor === null) return
+        if (String(editor.title).trim().length === 0 && String(editor.body).trim().length === 0) {
+          notice('先写点什么吧')
+          return
+        }
+        await guard(async () => {
+          const payload = {
+            title: editor.title,
+            body: editor.body,
+            workspaceId: editor.workspaceId,
+            workspaceTitle: editor.workspaceTitle,
+            workspacePath: editor.workspacePath,
+          }
+          const node = editor.mode === 'edit'
+            ? await call('update', { id: editor.id, ...payload })
+            : await call('create', payload)
+          source.set({ editor: null, selectedId: String(node?.id ?? ''), view: 'active' })
+          notice(editor.mode === 'edit' ? T.saved : T.saved)
+          if (editor.refineAfterSave === true && node?.id !== undefined) {
+            await actions.refine(node.id, editor.hint)
+          }
+          await refresh()
+        })
+      },
+
+      async setArchived(id, archived) {
+        await guard(async () => {
+          await call('archive', { id, archived })
+          notice(archived ? T.archived2 : T.unarchived)
+          await refresh()
+        })
+      },
+
+      async remove(id) {
+        const state = source.getSnapshot()
+        if (state.confirmingId !== id) {
+          source.set({ confirmingId: id })
+          return
+        }
+        source.set({ confirmingId: '' })
+        await guard(async () => {
+          await call('remove', { id })
+          notice(T.removed)
+          source.set({ selectedId: '' })
+          await refresh()
+        })
+      },
+
+      async refine(id, hint) {
+        await guard(async () => {
+          await call('refine', { id, hint: hint ?? '' })
+          await refresh()
+          schedulePoll()
+        })
+      },
+
+      async copy(node) {
+        if (node === undefined || node === null) return
+        const ok = await writeClipboard(composeNodeText(node))
+        notice(ok ? T.copied : T.copyFailed)
+      },
+
+      dismissNotice() {
+        source.set({ notice: '' })
+      },
+
+      openSettings() {
+        const current = source.getSnapshot()
+        source.set({
+          settingsOpen: true,
+          catalogError: '',
+          settingsDraft: {
+            provider: current.preferences?.provider ?? '',
+            model: current.preferences?.model ?? '',
+            alignPrompt: current.preferences?.alignPrompt ?? '',
+          },
+        })
+        void loadCatalog()
+      },
+
+      closeSettings() {
+        source.set({ settingsOpen: false })
+      },
+
+      patchSettings(patch) {
+        const current = source.getSnapshot()
+        const next = { ...current.settingsDraft, ...patch }
+        if (typeof patch.provider === 'string' && patch.provider !== current.settingsDraft.provider) {
+          const providers = Array.isArray(current.catalog?.providers) ? current.catalog.providers : []
+          const entry = providers.find((item) => item.id === patch.provider)
+          next.model = Array.isArray(entry?.models) && entry.models.length > 0 ? entry.models[0].id : ''
+        }
+        source.set({ settingsDraft: next })
+      },
+
+      async saveSettings() {
+        const draft = source.getSnapshot().settingsDraft
+        await guard(async () => {
+          const saved = await call('settings/set', {
+            provider: draft.provider,
+            model: draft.model,
+            alignPrompt: draft.alignPrompt,
+          })
+          source.set({
+            preferences: saved ?? { provider: '', model: '', alignPrompt: '' },
+            settingsOpen: false,
+          })
+          notice(saved?.provider ? `${T.settingsSavedPinned} ${saved.provider} / ${saved.model}` : T.settingsSavedDefault)
+        })
+      },
+
+      /**
+       * Hand this note to a session in its workspace, with the preset line and
+       * the note queued for the composer. Nothing is sent.
+       * @param node - the note to align on.
+       */
+      alignToWorkspace(node) {
+        const workspaceId = String(node?.workspaceId ?? '')
+        if (workspaceId.length === 0) {
+          notice(T.alignNeedsWorkspace)
+          return
+        }
+        const preset = source.getSnapshot().preferences?.alignPrompt ?? ''
+        const result = deps.jump(workspaceId, composePlanPrompt(node, preset))
+        if (result !== true) notice(result)
+      },
+
+      /**
+       * Queue the text a session-scoped entry applies once the composer for the
+       * freshly opened session is mounted.
+       * @param prompt - the composed plan.
+       */
+      queueDraft(prompt) {
+        source.set({ pendingPrompt: String(prompt ?? '') })
+      },
+
+      /**
+       * Drop the queued text, optionally reporting why.
+       * @param message - empty to stay silent.
+       */
+      clearPending(message) {
+        source.set({ pendingPrompt: '' })
+        if (typeof message === 'string' && message.length > 0) notice(message)
+      },
+
+      openConsole() {
+        try {
+          deps.openConsole()
+        } catch {
+          // The panel registration owns navigation; a removed slot is not fatal.
+        }
+      },
+    }
+
+    return {
+      source,
+      actions,
+      currentNode,
+      dispose() {
+        disposed = true
+        if (pollTimer !== null) clearTimeout(pollTimer)
+        pollTimer = null
+      },
+    }
+  }
+
+  /** @param props - injected face plus standard seats. */
+  function NodeCard({ node, active, onSelect }) {
+    return h('button', {
+      type: 'button',
+      className: 'tn-card',
+      'data-active': active ? 'true' : 'false',
+      onClick: () => onSelect(node.id),
+    },
+      h('div', { className: 'tn-card-title' }, node.title || T.untitled),
+      h('div', { className: 'tn-card-meta' },
+        h('span', null, node.workspaceTitle || node.workspacePath || T.workspaceNone),
+        node.refine?.status === 'done' ? h('span', null, '· 已完善') : null,
+        node.refine?.status === 'running' ? h('span', null, '· 完善中') : null,
+        node.refine?.status === 'error' ? h('span', null, '· 完善失败') : null,
+        node.status === 'archived' ? h('span', null, '· 已归档') : null,
+      ),
+    )
+  }
+
+  /** @param props - the selected node and the page actions. */
+  function NodeDetail({ node, actions }) {
+    const labels = React.useMemo(() => ({
+      code: { copyLabel: '复制代码', copiedLabel: '已复制' },
+      footnotes: '脚注',
+    }), [])
+    if (node === undefined) return h('div', { className: 'tn-detail' }, h('div', { className: 'tn-empty' }, T.detailEmpty))
+    const refine = node.refine ?? { status: 'idle', content: '' }
+    return h('div', { className: 'tn-detail' },
+      h('h2', null, node.title || T.untitled),
+      h('div', { className: 'tn-detail-meta' },
+        node.workspacePath ? `${node.workspaceTitle ? `${node.workspaceTitle} · ` : ''}${node.workspacePath}` : T.workspaceNone,
+        node.status === 'archived' ? ' · 已归档' : '',
+      ),
+      h('div', { className: 'tn-label' }, T.mine),
+      node.body && node.body.trim().length > 0
+        ? h('div', { className: 'tn-body' }, node.body)
+        : h('div', { className: 'tn-body tn-body-empty' }, T.noBody),
+
+      h('div', { className: 'tn-label' }, T.ai),
+      refine.status === 'running'
+        ? h('div', { className: 'tn-hint' }, T.aiRunning)
+        : null,
+      refine.status === 'error'
+        ? h('div', { className: 'tn-warn' }, `${T.aiFailed}：${refine.error || '未知原因'}`)
+        : null,
+      refine.status === 'done' && refine.content
+        ? h('div', { className: 'tn-ai' },
+          h(MarkdownText, { text: refine.content, labels }),
+          refine.warning ? h('div', { className: 'tn-hint' }, refine.warning) : null,
+          h('div', { className: 'tn-hint' }, `${T.model}：${refine.provider}/${refine.model} · ${String(refine.at).replace('T', ' ').slice(0, 16)}`),
+        )
+        : null,
+      refine.status === 'idle'
+        ? h('div', { className: 'tn-hint' }, T.aiIdle)
+        : null,
+
+      h('div', { className: 'tn-actions' },
+        h(Button, {
+          variant: 'primary',
+          disabled: refine.status === 'running',
+          onClick: () => { void actions.refine(node.id, '') },
+        }, refine.content ? T.refineAgain : T.refine),
+        h(Button, {
+          disabled: !node.workspaceId,
+          title: node.workspaceId ? T.alignHint : T.alignNeedsWorkspace,
+          onClick: () => actions.alignToWorkspace(node),
+        }, T.align),
+        h(Button, { onClick: () => { void actions.copy(node) } }, T.copy),
+        h(Button, { onClick: () => actions.openEdit(node) }, T.edit),
+        node.status === 'archived'
+          ? h(Button, { onClick: () => { void actions.setArchived(node.id, false) } }, T.unarchive)
+          : h(Button, { onClick: () => { void actions.setArchived(node.id, true) } }, T.archive),
+        h(Button, { variant: 'ghost', className: 'tn-danger', onClick: () => { void actions.remove(node.id) } }, T.remove),
+      ),
+    )
+  }
+
+  /**
+   * The editor modal, shared by the console and the floating ball.
+   * @param props - store state plus actions and the workspace catalog.
+   */
+  function EditorModal({ state, actions, workspaces }) {
+    const editor = state.editor
+    if (editor === null) return null
+    const items = Array.isArray(workspaces) ? workspaces : []
+    return h(Modal, {
+      open: true,
+      onClose: actions.closeEditor,
+      title: editor.mode === 'edit' ? T.edit : T.create,
+    },
+      h('div', { className: 'tn-field' },
+        h('span', { className: 'tn-field-label' }, '标题'),
+        h(Input, {
+          value: editor.title,
+          placeholder: T.untitled,
+          onChange: (event) => actions.patchEditor({ title: event.target.value }),
+        }),
+      ),
+      h('div', { className: 'tn-field' },
+        h('span', { className: 'tn-field-label' }, T.mine),
+        h('textarea', {
+          className: 'tn-textarea',
+          value: editor.body,
+          placeholder: T.quickPlaceholder,
+          onChange: (event) => actions.patchEditor({ body: event.target.value }),
+        }),
+      ),
+      h('div', { className: 'tn-field' },
+        h('span', { className: 'tn-field-label' }, T.workspace),
+        h('select', {
+          className: 'tn-select',
+          value: editor.workspaceId,
+          onChange: (event) => {
+            const next = items.find((entry) => String(entry.workspaceId) === event.target.value)
+            actions.bindWorkspace(next ?? null)
+          },
+        },
+          h('option', { value: '' }, T.workspaceNone),
+          items.map((entry) => h('option', { key: String(entry.workspaceId), value: String(entry.workspaceId) }, `${entry.title || entry.path}`)),
+        ),
+        editor.workspaceId === '' ? null : h('span', { className: 'tn-hint' }, editor.workspacePath),
+        h('span', { className: 'tn-hint' }, T.workspaceHint),
+      ),
+      h('div', { className: 'tn-field' },
+        h('span', { className: 'tn-field-label' }, T.refineHint),
+        h(Input, {
+          value: editor.hint,
+          placeholder: T.refineHintPlaceholder,
+          onChange: (event) => actions.patchEditor({ hint: event.target.value }),
+        }),
+      ),
+      h('div', { className: 'tn-modal-actions' },
+        h(Button, { onClick: actions.closeEditor }, T.cancel),
+        h(Button, {
+          variant: 'outline',
+          onClick: () => { actions.patchEditor({ refineAfterSave: true }); void actions.save() },
+        }, T.saveAndRefine),
+        h(Button, { variant: 'primary', onClick: () => { void actions.save() } }, T.save),
+      ),
+    )
+  }
+
+  /**
+   * The model picker: which route the manual "AI 完善" call uses.
+   * @param props - store state plus actions.
+   */
+  function SettingsModal({ state, actions }) {
+    if (state.settingsOpen !== true) return null
+    const providers = Array.isArray(state.catalog?.providers) ? state.catalog.providers : []
+    const draft = state.settingsDraft
+    const current = providers.find((entry) => entry.id === draft.provider)
+    const models = Array.isArray(current?.models) ? current.models : []
+    const fallback = state.catalog?.fallback
+    const followLabel = fallback === undefined || fallback === null
+      ? T.followDefault
+      : `${T.followDefault}（${fallback.provider} / ${fallback.model}）`
+
+    return h(Modal, {
+      open: true,
+      onClose: actions.closeSettings,
+      title: T.settingsTitle,
+    },
+      h('div', { className: 'tn-field' },
+        h('span', { className: 'tn-field-label' }, T.settingsModel),
+        h('select', {
+          className: 'tn-select',
+          value: draft.provider,
+          onChange: (event) => actions.patchSettings({ provider: event.target.value }),
+        },
+          h('option', { value: '' }, followLabel),
+          providers.map((entry) => h('option', { key: entry.id, value: entry.id }, entry.name)),
+        ),
+      ),
+      draft.provider === ''
+        ? null
+        : h('div', { className: 'tn-field' },
+          h('span', { className: 'tn-field-label' }, T.settingsModelName),
+          models.length === 0
+            ? h(Input, {
+              value: draft.model,
+              placeholder: 'model id',
+              onChange: (event) => actions.patchSettings({ model: event.target.value }),
+            })
+            : h('select', {
+              className: 'tn-select',
+              value: draft.model,
+              onChange: (event) => actions.patchSettings({ model: event.target.value }),
+            }, models.map((model) => h('option', {
+              key: model.id,
+              value: model.id,
+            }, model.name === model.id ? model.id : `${model.name}（${model.id}）`))),
+        ),
+      state.catalogError === '' ? null : h('div', { className: 'tn-warn' }, `${T.catalogFailed}${state.catalogError}`),
+      h('span', { className: 'tn-hint' }, T.settingsHint),
+      h('div', { className: 'tn-field', style: { marginTop: '14px' } },
+        h('span', { className: 'tn-field-label' }, T.settingsAlign),
+        h('textarea', {
+          className: 'tn-textarea',
+          style: { minHeight: '64px' },
+          value: draft.alignPrompt,
+          placeholder: T.settingsAlignPlaceholder,
+          onChange: (event) => actions.patchSettings({ alignPrompt: event.target.value }),
+        }),
+        h('span', { className: 'tn-hint' }, T.settingsAlignHint),
+      ),
+      h('div', { className: 'tn-modal-actions' },
+        h(Button, { onClick: actions.closeSettings }, T.cancel),
+        h(Button, { variant: 'primary', onClick: () => { void actions.saveSettings() } }, T.save),
+      ),
+    )
+  }
+
+  /**
+   * The 监控台 page registered into the keyed `main` slot.
+   * @param props - standard seats plus the injected `todo` actions and `useTodo`.
+   */
+  function ConsolePage(props) {
+    const state = props.useTodo((snapshot) => snapshot)
+    const workspaces = props.useWorkspaces((snapshot) => (snapshot === undefined ? undefined : snapshot.items))
+    const actions = props.todo
+    React.useEffect(() => { void actions.refresh() }, [actions])
+
+    const workspaceList = Array.isArray(workspaces) ? workspaces : []
+    const visible = state.nodes.filter((node) => (state.view === 'archived' ? node.status === 'archived' : node.status === 'active'))
+    const selected = visible.find((node) => node.id === state.selectedId) ?? visible[0]
+    const pinned = state.preferences?.provider
+    const modelLabel = pinned ? `${T.modelPinned}：${pinned} / ${state.preferences.model}` : T.modelFollowing
+
+    return h('div', { className: 'tn-page' },
+      h('div', { className: 'tn-scroll' },
+        h('div', { className: 'tn-content' },
+          h('div', { className: 'tn-head' },
+            h('div', null,
+              h('h1', null, T.title),
+              h('div', { className: 'tn-sub' }, `${T.subtitle} · 共 ${state.total} 条${state.truncated ? ` ${T.truncated}` : ''} · ${modelLabel}`),
+            ),
+            h('div', { className: 'tn-head-actions' },
+              h(Button, { onClick: actions.refresh }, T.refresh),
+              h(Button, { onClick: actions.openSettings }, T.settings),
+              h(Button, { variant: 'primary', icon: h(IconPlusOutlineRegular, { size: 16 }), onClick: () => actions.openCreate(null) }, T.create),
+            ),
+          ),
+
+          state.storage?.ok === false
+            ? h('div', { className: 'tn-warn' }, `${T.storageDown}${state.storage.error || '未知原因'}`)
+            : null,
+          state.phase === 'error' && state.error
+            ? h('div', { className: 'tn-warn' }, state.error)
+            : null,
+
+          h('div', { className: 'tn-tabs' },
+            h(SegmentedTabs, {
+              items: [
+                { value: 'active', label: `${T.active} (${state.nodes.filter((node) => node.status !== 'archived').length})` },
+                { value: 'archived', label: `${T.archived} (${state.nodes.filter((node) => node.status === 'archived').length})` },
+              ],
+              value: state.view,
+              onChange: actions.setView,
+              label: T.viewLabel,
+            }),
+          ),
+
+          state.phase === 'loading'
+            ? h('div', { className: 'tn-empty' }, T.loading)
+            : visible.length === 0
+              ? h('div', { className: 'tn-empty' }, state.view === 'archived' ? T.emptyArchived : T.empty)
+              : h('div', { className: 'tn-split' },
+                h('div', { className: 'tn-list' }, visible.map((node) => h(NodeCard, {
+                  key: node.id,
+                  node,
+                  active: selected !== undefined && node.id === selected.id,
+                  onSelect: actions.select,
+                }))),
+                h(NodeDetail, { node: selected, actions }),
+              ),
+
+          h(EditorModal, { state, actions, workspaces: workspaceList }),
+          h(SettingsModal, { state, actions }),
+        ),
+      ),
+    )
+  }
+
+  /** The sidebar row's glyph: bare, as every panel row supplies it. */
+  function PanelIcon({ size }) {
+    return h(IconChecklistOutlineRegular, { size })
+  }
+
+  /**
+   * Session-scoped helper: drops the queued plan into the composer of the
+   * session the console just opened.
+   *
+   * It uses `inputActions`, the standard prop every session-scoped entry
+   * receives from the shell — the only prefill path the installed client
+   * actually has. It renders a one-line hint while the text is being applied
+   * and nothing at all otherwise.
+   * @param props - session-scope seats plus the injected `todo` actions.
+   */
+  function PendingPlanDraft(props) {
+    const state = props.useTodo((snapshot) => snapshot)
+    const actions = props.todo
+    const pending = state.pendingPrompt
+    const input = props.inputActions
+    React.useEffect(() => {
+      if (pending === '') return undefined
+      if (input === undefined || input === null || typeof input.setDraft !== 'function') {
+        actions.clearPending(T.alignNoPrefill)
+        return undefined
+      }
+      // One tick later: this entry mounts together with the editor that binds
+      // the same input model.
+      const timer = setTimeout(() => {
+        try {
+          input.setDraft(pending)
+          actions.clearPending(T.alignFilled)
+        } catch (error) {
+          actions.clearPending(`${T.alignFailed}${error instanceof Error ? error.message : String(error)}`)
+        }
+      }, 80)
+      return () => { clearTimeout(timer) }
+    }, [pending, input, actions])
+    return pending === '' ? null : h('div', { className: 'tn-dock-hint' }, T.alignFilling)
+  }
+
+  /**
+   * The floating ball (+ quick create + toast). Root-scoped: it hides itself
+   * whenever the open session owns no workspace.
+   * @param props - standard seats plus the injected `todo` actions and `useTodo`.
+   */
+  function FloatingBall(props) {
+    const state = props.useTodo((snapshot) => snapshot)
+    const actions = props.todo
+    const workspaces = props.useWorkspaces((snapshot) => (snapshot === undefined ? undefined : snapshot.items))
+    const sessionId = props.useSessions((snapshot) => (snapshot === undefined ? undefined : Object.values(snapshot.byId)
+      .find((session) => (session.retainedBy?.mainView ?? 0) > 0)?.id))
+    const workspace = (Array.isArray(workspaces) ? workspaces : [])
+      .find((entry) => sessionId !== undefined && entry.sessionIds.includes(sessionId))
+
+    const [open, setOpen] = React.useState(false)
+    const [draft, setDraft] = React.useState({ title: '', body: '' })
+    const [position, setPosition] = React.useState(readBallPosition)
+    const drag = React.useRef(null)
+
+    React.useEffect(() => { void actions.refresh() }, [actions])
+    React.useEffect(() => {
+      if (state.notice === '' ) return undefined
+      const timer = setTimeout(() => actions.dismissNotice(), 3200)
+      return () => clearTimeout(timer)
+    }, [state.noticeSeq, state.notice, actions])
+
+    const visible = sessionId !== undefined && workspace !== undefined
+
+    const onPointerDown = (event) => {
+      drag.current = { startX: event.clientX, startY: event.clientY, x: position.x, y: position.y, moved: false }
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId)
+      } catch {
+        // Pointer capture is best-effort; dragging still works without it.
+      }
+    }
+    const onPointerMove = (event) => {
+      const current = drag.current
+      if (current === null) return
+      const dx = event.clientX - current.startX
+      const dy = event.clientY - current.startY
+      if (!current.moved && Math.abs(dx) + Math.abs(dy) < 5) return
+      current.moved = true
+      setPosition({
+        x: Math.max(8, Math.min(window.innerWidth - 56, current.x - dx)),
+        y: Math.max(8, Math.min(window.innerHeight - 56, current.y - dy)),
+      })
+    }
+    const onPointerUp = (event) => {
+      const current = drag.current
+      drag.current = null
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      } catch {
+        // Releasing a capture we never held is not an error.
+      }
+      if (current === null) return
+      if (current.moved) storeBallPosition(position)
+      else setOpen((value) => !value)
+    }
+
+    const commit = async (refine) => {
+      if (draft.title.trim().length === 0 && draft.body.trim().length === 0) {
+        setOpen(false)
+        return
+      }
+      setOpen(false)
+      actions.openCreate({
+        workspaceId: workspace?.workspaceId,
+        workspaceTitle: workspace?.title,
+        workspacePath: workspace?.path,
+      })
+      actions.patchEditor({ title: draft.title, body: draft.body, refineAfterSave: refine })
+      await actions.save()
+      setDraft({ title: '', body: '' })
+    }
+
+    return h('div', null,
+      visible
+        ? h('div', {
+          className: 'tn-ball-root',
+          // The overlay layer's `.overlayLayer > *` rule opts children back into
+          // pointer events; an inline style is the only reliable override.
+          style: { right: `${position.x}px`, bottom: `${position.y}px`, pointerEvents: 'none' },
+        },
+          open
+            ? h('div', {
+              className: 'tn-quick',
+              style: { right: `${position.x}px`, bottom: `${position.y + 52}px`, pointerEvents: 'auto' },
+            },
+              h('div', { className: 'tn-quick-head' },
+                h('strong', null, T.quickTitle),
+                h('button', {
+                  type: 'button',
+                  className: 'tn-card',
+                  style: { width: 'auto', padding: '2px 8px' },
+                  onClick: () => { setOpen(false); actions.openConsole() },
+                }, T.openConsole),
+              ),
+              h('div', { className: 'tn-field' },
+                h(Input, {
+                  value: draft.title,
+                  placeholder: T.untitled,
+                  onChange: (event) => setDraft((value) => ({ ...value, title: event.target.value })),
+                }),
+              ),
+              h('div', { className: 'tn-field' },
+                h('textarea', {
+                  className: 'tn-textarea',
+                  style: { minHeight: '84px' },
+                  value: draft.body,
+                  placeholder: T.quickPlaceholder,
+                  onChange: (event) => setDraft((value) => ({ ...value, body: event.target.value })),
+                }),
+              ),
+              h('div', { className: 'tn-field' },
+                h('span', { className: 'tn-field-label' }, `${T.workspace}：${workspace.title || workspace.path}`),
+              ),
+              h('div', { className: 'tn-quick-actions' },
+                h(Button, { size: 'sm', onClick: () => setOpen(false) }, T.cancel),
+                h('span', { style: { display: 'flex', gap: '8px' } },
+                  h(Button, { size: 'sm', onClick: () => { void commit(false) } }, T.save),
+                  h(Button, { size: 'sm', variant: 'primary', onClick: () => { void commit(true) } }, T.saveAndRefine),
+                ),
+              ),
+            )
+            : null,
+          h('button', {
+            type: 'button',
+            className: 'tn-ball',
+            title: T.ball,
+            'aria-label': T.ball,
+            style: { pointerEvents: 'auto' },
+            onPointerDown,
+            onPointerMove,
+            onPointerUp,
+          }, h(IconChecklistOutlineRegular, { size: 20 })),
+        )
+        : null,
+      state.notice === ''
+        ? null
+        : h('div', { className: 'tn-toast', key: state.noticeSeq }, state.notice),
+    )
+  }
+
+  return {
+    name: 'todoNote.client',
+    inject: ['slots', 'connection', 'layout'],
+    apply(ctx) {
+      injectStyle()
+      const call = createCaller(ctx.connection)
+      const store = createTodoStore(call, {
+        openConsole: () => ctx.layout.selectPanel(PANEL_ID),
+        /**
+         * Open a session in that workspace. The draft cannot be handed to
+         * `startSession`: the installed client has no draft-initialization
+         * option (`clearPreviousDraft`/`requestDraftInitialization` are absent
+         * from its bundle), so the queue is applied by the session-scoped
+         * `PendingPlanDraft` entry below, through the `inputActions` the shell
+         * gives every session entry.
+         * @param workspaceId - the note's bound workspace.
+         * @param prompt - preset line + the note, composed by the store.
+         * @returns true, or a message to show instead.
+         */
+        jump: (workspaceId, prompt) => {
+          const service = ctx.get('uiWorkspace')
+          if (service === undefined || service === null || typeof service.startSession !== 'function') {
+            return T.alignUnsupported
+          }
+          try {
+            store.actions.queueDraft(prompt)
+            service.startSession(workspaceId)
+            return true
+          } catch (error) {
+            store.actions.clearPending('')
+            return `${T.alignFailed}${error instanceof Error ? error.message : String(error)}`
+          }
+        },
+      })
+      // One stable face for every seat: the source identity must not move, or
+      // the renderer would rebind the hook on each registration.
+      const injected = { hooks: { todo: store.source }, todo: store.actions }
+      const face = () => injected
+
+      ctx.effect(() => () => store.dispose(), 'todonote: store')
+
+      ctx.slots.inject('main', () => ctx.slots.register({
+        name: 'main',
+        key: PANEL_ID,
+        inject: face,
+      }, ConsolePage))
+
+      ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+        name: 'sidebar.panellist',
+        id: PANEL_ID,
+        order: 40,
+        label: T.panel,
+      }, PanelIcon))
+
+      ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+        name: 'shell.overlay',
+        id: 'todonote.ball',
+        order: 70,
+        inject: face,
+      }, FloatingBall))
+
+      // Session-scoped: applies a plan the console queued for the composer of
+      // the session it just opened.
+      ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+        name: 'conversation.input.dock',
+        id: 'todonote.pending-draft',
+        order: 90,
+        inject: face,
+      }, PendingPlanDraft))
+    },
+  }
+}

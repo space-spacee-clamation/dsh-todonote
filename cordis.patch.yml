@@ -1,0 +1,24 @@
+# TodoNote — 碎屑工作计划便签。
+#
+# One row registers BOTH halves: the Host plugin below, and (derived by the
+# client-modules scan from this package's `dsh.client`) the browser half
+# `lib/client.js`. Adding this bundle to a profile needs a restart of the
+# serving process; after that a page refresh is enough.
+#
+# Config reaches the Host half only (the client entry is created with the id
+# alone). Everything here is optional and has a working default.
+- insert:
+    - id: todonote
+      name: dsh-todonote
+      config:
+        # Storage backend name registered on ctx.storage (the web profile
+        # registers `json`, which writes ~/.dsh/storages/todonote.json).
+        backend: json
+        # Leave provider/model empty to use the first provider and its first
+        # listed model. Set both to pin one exact route.
+        provider: ''
+        model: ''
+        # Includes the provider's reasoning budget on a thinking model, so it
+        # is generously sized: a five-section answer can need several thousand.
+        maxTokens: 8000
+        refineTimeoutMs: 180000
